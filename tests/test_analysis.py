@@ -78,6 +78,18 @@ class AnalyzeWavTests(unittest.TestCase):
         self.assertEqual(payload, {"status": "ok"})
         self.assertEqual(headers["Cache-Control"], "no-store")
 
+    def test_wsgi_feature_manifest_route(self):
+        status, _, payload = request_api("GET", "/api/features")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["version"], 1)
+        self.assertEqual(len(payload["features"]), 5)
+
+    def test_wsgi_feature_manifest_rejects_non_get_requests(self):
+        status, headers, payload = request_api("POST", "/api/features")
+        self.assertEqual(status, 405)
+        self.assertEqual(headers["Allow"], "GET")
+        self.assertEqual(payload["error"], "Método no permitido.")
+
     def test_wsgi_analyze_route_returns_bpm(self):
         status, _, payload = request_api("POST", "/api/analyze", make_wav(), "audio/wav")
         self.assertEqual(status, 200)

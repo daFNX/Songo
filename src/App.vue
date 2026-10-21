@@ -1,190 +1,84 @@
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { useAudioAnalyzer } from './composables/useAudioAnalyzer'
+import { useDemoSession } from './composables/useDemoSession'
+import { FEATURES, mergeFeatureConfig } from './features'
 
-const MAX_FILE_BYTES = 50 * 1024 * 1024
-const MAX_ANALYSIS_BYTES = 4 * 1024 * 1024
-const MAX_DURATION_SECONDS = 180
-const OUTPUT_SAMPLE_RATE = 11025
-const SUPPORTED_EXTENSIONS = new Set(['wav', 'mp3', 'm4a', 'aac', 'ogg', 'flac', 'mp4', 'webm'])
-const selectedFile = ref(null)
-const isDragging = ref(false)
-const isAnalyzing = ref(false)
-const analysisStage = ref('preparing')
-const result = ref(null)
-const errorMessage = ref('')
-const fileInput = ref(null)
-let requestController
-
-const fileSize = computed(() => {
-  if (!selectedFile.value) return ''
-  return selectedFile.value.size < 1024 * 1024
-    ? `${(selectedFile.value.size / 1024).toFixed(0)} KB`
-    : `${(selectedFile.value.size / 1024 / 1024).toFixed(1)} MB`
+const {
+  selectedFile,
+  isDragging,
+  isAnalyzing,
+  analysisStage,
+  result,
+  errorMessage,
+  fileInput,
+  recordingState,
+  recordingSeconds,
+  recordingError,
+  isRecording,
+  fileSize,
+  fileFormat,
+  onInputChange,
+  onDrop,
+  analyze,
+  clearFile,
+  startRecording,
+  stopRecording,
+} = useAudioAnalyzer()
+const { session, sessionError, signIn, signOut } = useDemoSession()
+const featureItems = ref(FEATURES)
+const featureConfigMessage = ref('')
+const isLightMode = ref(false)
+const isAuthOpen = ref(false)
+const authEmail = ref('')
+const authDialog = ref(null)
+const futureFeatures = computed(() => featureItems.value.filter((feature) => !['bpm', 'recording'].includes(feature.id)))
+const recordingTime = computed(() => {
+  const minutes = Math.floor(recordingSeconds.value / 60)
+  const seconds = String(recordingSeconds.value % 60).padStart(2, '0')
+  return `${minutes}:${seconds}`
 })
 
-const fileFormat = computed(() => {
-  if (!selectedFile.value) return ''
-  return selectedFile.value.name.split('.').pop()?.toUpperCase() || 'AUDIO'
+watch(isLightMode, (enabled) => {
+  document.documentElement.dataset.theme = enabled ? 'light' : 'dark'
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', enabled ? '#f7f2f0' : '#101011')
+}, { immediate: true })
+
+watch(isAuthOpen, async (open) => {
+  await nextTick()
+  if (open) authDialog.value?.showModal()
 })
 
-function validateFile(file) {
-  if (!file) return 'No pudimos leer ese archivo. Inténtalo de nuevo.'
-  const extension = file.name.split('.').pop()?.toLowerCase()
-  if (!SUPPORTED_EXTENSIONS.has(extension)) {
-    return 'Prueba con WAV, MP3, M4A, AAC, OGG o FLAC. El formato debe ser compatible con tu navegador.'
-  }
-  if (file.size === 0) return 'El archivo está vacío. Elige una grabación con audio.'
-  if (file.size > MAX_FILE_BYTES) {
-    return 'El archivo supera el límite de 50 MB. Prueba con un fragmento más corto.'
-  }
-  return ''
-}
-
-function chooseFile(file) {
-  errorMessage.value = ''
-  result.value = null
-  const validationError = validateFile(file)
-  if (validationError) {
-    selectedFile.value = null
-    errorMessage.value = validationError
-    return
-  }
-  selectedFile.value = file
-}
-
-function onInputChange(event) {
-  chooseFile(event.target.files?.[0])
-  event.target.value = ''
-}
-
-function onDrop(event) {
-  isDragging.value = false
-  chooseFile(event.dataTransfer?.files?.[0])
-}
-
-function formatDuration(seconds) {
-  const minutes = Math.floor(seconds / 60)
-  const remainder = Math.round(seconds % 60)
-  return `${minutes}:${String(remainder).padStart(2, '0')}`
-}
-
-async function prepareAnalysisAudio(file) {
-  const AudioContextConstructor = window.AudioContext || window.webkitAudioContext
-  if (!AudioContextConstructor) {
-    throw new Error('Este navegador no puede preparar el audio. Prueba con una versión reciente de Chrome, Edge o Safari.')
-  }
-
-  const audioContext = new AudioContextConstructor()
-  let decodedAudio
+async function loadFeatureConfig() {
   try {
-    decodedAudio = await audioContext.decodeAudioData(await file.arrayBuffer())
-  } catch {
-    throw new Error('No pudimos leer ese audio. Prueba WAV, MP3, M4A u OGG compatible con tu navegador.')
-  } finally {
-    await audioContext.close()
-  }
-
-  if (decodedAudio.duration < 2) {
-    throw new Error('El audio debe durar al menos 2 segundos.')
-  }
-  if (decodedAudio.duration > MAX_DURATION_SECONDS) {
-    throw new Error('El audio supera la duración máxima de 3 minutos.')
-  }
-
-  const frameCount = Math.floor(decodedAudio.duration * OUTPUT_SAMPLE_RATE)
-  const wav = new ArrayBuffer(44 + frameCount * 2)
-  const header = new DataView(wav)
-  const writeTag = (offset, value) => {
-    for (let index = 0; index < value.length; index += 1) {
-      header.setUint8(offset + index, value.charCodeAt(index))
-    }
-  }
-
-  writeTag(0, 'RIFF')
-  header.setUint32(4, wav.byteLength - 8, true)
-  writeTag(8, 'WAVE')
-  writeTag(12, 'fmt ')
-  header.setUint32(16, 16, true)
-  header.setUint16(20, 1, true)
-  header.setUint16(22, 1, true)
-  header.setUint32(24, OUTPUT_SAMPLE_RATE, true)
-  header.setUint32(28, OUTPUT_SAMPLE_RATE * 2, true)
-  header.setUint16(32, 2, true)
-  header.setUint16(34, 16, true)
-  writeTag(36, 'data')
-  header.setUint32(40, frameCount * 2, true)
-
-  const channels = Array.from(
-    { length: decodedAudio.numberOfChannels },
-    (_, index) => decodedAudio.getChannelData(index),
-  )
-  const samplesPerOutputFrame = decodedAudio.sampleRate / OUTPUT_SAMPLE_RATE
-  for (let index = 0; index < frameCount; index += 1) {
-    const start = Math.floor(index * samplesPerOutputFrame)
-    const end = Math.min(decodedAudio.length, Math.max(start + 1, Math.floor((index + 1) * samplesPerOutputFrame)))
-    let sample = 0
-    for (const channel of channels) {
-      for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1) {
-        sample += channel[sourceIndex]
-      }
-    }
-    sample /= (end - start) * channels.length
-    const pcmSample = Math.max(-1, Math.min(1, sample))
-    header.setInt16(44 + index * 2, pcmSample < 0 ? pcmSample * 32768 : pcmSample * 32767, true)
-  }
-
-  if (wav.byteLength > MAX_ANALYSIS_BYTES) {
-    throw new Error('No pudimos reducir el audio a un tamaño compatible. Prueba con un fragmento más corto.')
-  }
-  return new Blob([wav], { type: 'audio/wav' })
-}
-
-async function analyze() {
-  if (!selectedFile.value || isAnalyzing.value) return
-
-  isAnalyzing.value = true
-  errorMessage.value = ''
-  result.value = null
-  requestController = new AbortController()
-
-  try {
-    analysisStage.value = 'preparing'
-    const analysisAudio = await prepareAnalysisAudio(selectedFile.value)
-    analysisStage.value = 'analyzing'
-    const response = await fetch('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'audio/wav' },
-      body: analysisAudio,
-      signal: requestController.signal,
-    })
+    const response = await fetch('/api/features')
+    if (!response.ok) throw new Error('No se pudo consultar el catálogo de funciones.')
     const data = await response.json()
-    if (!response.ok) {
-      throw new Error(data.error || 'No pudimos analizar el archivo. Prueba con otro audio.')
-    }
-    result.value = {
-      ...data,
-      duration: formatDuration(data.duration_seconds),
-    }
-  } catch (error) {
-    if (error.name !== 'AbortError') {
-      errorMessage.value = error.message || 'No pudimos conectar con el analizador. Inténtalo de nuevo.'
-    }
-  } finally {
-    isAnalyzing.value = false
-    analysisStage.value = 'preparing'
-    requestController = undefined
+    featureItems.value = mergeFeatureConfig(data.features)
+  } catch {
+    featureConfigMessage.value = 'No pudimos actualizar el catálogo; mostramos las funciones de esta maqueta.'
   }
 }
 
-function clearFile() {
-  requestController?.abort()
-  selectedFile.value = null
-  result.value = null
-  errorMessage.value = ''
-  isAnalyzing.value = false
+function openSignIn() {
+  sessionError.value = ''
+  isAuthOpen.value = true
 }
 
-onBeforeUnmount(() => requestController?.abort())
+function submitSignIn() {
+  if (signIn(authEmail.value)) {
+    isAuthOpen.value = false
+    authEmail.value = ''
+  }
+}
+
+function handleFeatureAction(feature) {
+  if (!session.value && feature.requiresAuth) {
+    openSignIn()
+  }
+}
+
+loadFeatureConfig()
 </script>
 
 <template>
@@ -199,7 +93,16 @@ onBeforeUnmount(() => requestController?.abort())
         <span>songo<span class="wordmark-period">.</span></span>
       </a>
       <div class="topbar-note"><span class="status-dot"></span> Estudio de audio · beta</div>
-      <a class="topbar-link" href="#como-funciona">Cómo funciona <span aria-hidden="true">↗</span></a>
+      <nav class="topbar-actions" aria-label="Acciones de cuenta y apariencia">
+        <a class="topbar-link" href="#como-funciona">Cómo funciona <span aria-hidden="true">↗</span></a>
+        <button class="utility-button theme-toggle" type="button" :aria-pressed="isLightMode" @click="isLightMode = !isLightMode">
+          <span aria-hidden="true">{{ isLightMode ? '☾' : '☼' }}</span>
+          <span>{{ isLightMode ? 'Modo oscuro' : 'Modo claro' }}</span>
+        </button>
+        <span v-if="session" class="session-name">{{ session.name }}</span>
+        <button v-if="session" class="utility-button account-button" type="button" @click="signOut">Salir</button>
+        <button v-else class="utility-button account-button" type="button" @click="openSignIn">Entrar</button>
+      </nav>
     </header>
 
     <main>
@@ -234,6 +137,7 @@ onBeforeUnmount(() => requestController?.abort())
                 type="file"
                 accept=".wav,.mp3,.m4a,.aac,.ogg,.flac,.mp4,.webm,audio/*"
                 aria-label="Selecciona un archivo de audio"
+                :disabled="recordingState !== 'idle' || isAnalyzing"
                 @change="onInputChange"
               />
               <template v-if="selectedFile">
@@ -251,11 +155,42 @@ onBeforeUnmount(() => requestController?.abort())
                   <svg viewBox="0 0 24 24" fill="none"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </div>
                 <p class="drop-title">Suelta tu audio aquí</p>
-                <p class="drop-subtitle">o <button class="browse-button" type="button" @click="fileInput?.click()">explora tus archivos</button></p>
+                <p class="drop-subtitle">o <button class="browse-button" type="button" :disabled="recordingState !== 'idle' || isAnalyzing" @click="fileInput?.click()">explora tus archivos</button></p>
                 <span class="file-requirements">WAV · MP3 · M4A · OGG · HASTA 50 MB</span>
               </template>
             </div>
 
+            <div class="recording-control">
+              <button
+                v-if="recordingState === 'idle'"
+                class="record-button"
+                type="button"
+                :disabled="isAnalyzing"
+                @click="startRecording"
+              >
+                <span class="record-dot" aria-hidden="true"></span>
+                Grabar desde el micrófono
+              </button>
+              <button
+                v-else-if="isRecording"
+                class="record-button is-recording"
+                type="button"
+                @click="stopRecording"
+              >
+                <span class="record-dot" aria-hidden="true"></span>
+                Detener grabación
+                <span class="recording-time">{{ recordingTime }} / 03:00</span>
+              </button>
+              <span v-else class="recording-processing" role="status">
+                <span class="spinner" aria-hidden="true"></span>
+                Preparando la grabación…
+              </span>
+              <p class="recording-caption">Máximo 3 minutos · el audio no se guarda en el servidor</p>
+            </div>
+
+            <p v-if="recordingError" class="feedback error-message" role="alert">
+              <span class="feedback-icon" aria-hidden="true">!</span>{{ recordingError }}
+            </p>
             <p v-if="errorMessage" class="feedback error-message" role="alert">
               <span class="feedback-icon" aria-hidden="true">!</span>{{ errorMessage }}
             </p>
@@ -264,7 +199,7 @@ onBeforeUnmount(() => requestController?.abort())
             <button
               class="analyze-button"
               type="button"
-              :disabled="!selectedFile || isAnalyzing"
+              :disabled="!selectedFile || isAnalyzing || recordingState !== 'idle'"
               @click="analyze"
             >
               <span v-if="isAnalyzing" class="spinner" aria-hidden="true"></span>
@@ -327,10 +262,49 @@ onBeforeUnmount(() => requestController?.abort())
         </div>
       </section>
 
-      <section class="coming-soon" aria-label="Funciones futuras">
-        <span class="coming-icon" aria-hidden="true">✳</span>
-        <p><strong>Esto es solo el comienzo.</strong> Detección de acordes y análisis de similitud están en el horizonte.</p>
-        <span class="coming-label">PRÓXIMAMENTE</span>
+      <section class="feature-section" aria-labelledby="features-title">
+        <div class="feature-heading">
+          <div>
+            <p class="section-index">03 <span>/</span> HERRAMIENTAS</p>
+            <h2 id="features-title">Un espacio que crecerá contigo.</h2>
+          </div>
+          <span class="feature-session-status">
+            <span class="status-dot"></span>
+            {{ session ? 'Sesión de demostración' : 'Exploración sin cuenta' }}
+          </span>
+        </div>
+        <p v-if="featureConfigMessage" class="feature-config-message" role="status">{{ featureConfigMessage }}</p>
+        <div class="feature-grid">
+          <article v-for="feature in futureFeatures" :key="feature.id" class="feature-card">
+            <div class="feature-card-top">
+              <span class="feature-symbol" aria-hidden="true">{{ feature.id === 'chords' ? '⌁' : feature.id === 'similarity' ? '◎' : '▤' }}</span>
+              <span
+                class="feature-state"
+                :class="{ 'is-enabled': feature.enabled && feature.clientAvailable, 'is-configured': feature.enabled && !feature.clientAvailable }"
+              >
+                {{ feature.enabled ? (feature.clientAvailable ? 'DISPONIBLE' : 'MÓDULO CONFIGURADO') : 'EN PREPARACIÓN' }}
+              </span>
+            </div>
+            <h3>{{ feature.name }}</h3>
+            <p>{{ feature.description }}</p>
+            <button
+              v-if="feature.requiresAuth && !session"
+              class="feature-action"
+              type="button"
+              @click="handleFeatureAction(feature)"
+            >
+              Iniciar sesión <span aria-hidden="true">↗</span>
+            </button>
+            <span v-else-if="feature.requiresAuth" class="feature-locked">
+              {{ feature.enabled ? 'Configurado en el servidor · falta integrar el módulo' : 'Requiere cuenta · próximo lanzamiento' }}
+            </span>
+            <span v-else class="feature-locked">Próximamente</span>
+          </article>
+        </div>
+        <p class="session-disclaimer">
+          El inicio de sesión actual es una demostración local: no valida identidad ni protege datos.
+          No introduzcas contraseñas ni información sensible.
+        </p>
       </section>
     </main>
 
@@ -339,5 +313,35 @@ onBeforeUnmount(() => requestController?.abort())
       <span>Tu música, sin dudas.</span>
       <span class="footer-meta">Hecho para quienes hacen música <span aria-hidden="true">♡</span></span>
     </footer>
+
+    <dialog
+      v-if="isAuthOpen"
+      ref="authDialog"
+      class="auth-dialog"
+      aria-labelledby="auth-title"
+      @close="isAuthOpen = false"
+    >
+      <button class="dialog-close" type="button" aria-label="Cerrar ventana" @click="isAuthOpen = false">×</button>
+      <p class="section-index">CUENTA DE DEMOSTRACIÓN</p>
+      <h2 id="auth-title">Tu espacio, a tu ritmo.</h2>
+      <p class="dialog-copy">Ingresa un correo para previsualizar las funciones que requerirán una cuenta.</p>
+      <form class="auth-form" @submit.prevent="submitSignIn">
+        <label for="auth-email">Correo electrónico</label>
+        <input
+          id="auth-email"
+          v-model="authEmail"
+          type="email"
+          name="email"
+          autocomplete="email"
+          maxlength="254"
+          required
+          autofocus
+          placeholder="tu@correo.com"
+        />
+        <p v-if="sessionError" class="auth-error" role="alert">{{ sessionError }}</p>
+        <button class="analyze-button" type="submit">Continuar en modo demo <span class="button-arrow" aria-hidden="true">↗</span></button>
+      </form>
+      <p class="dialog-disclaimer">No se envía el correo a ningún servidor. La sesión se conserva solo en esta pestaña.</p>
+    </dialog>
   </div>
 </template>

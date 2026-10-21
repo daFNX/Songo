@@ -7,6 +7,11 @@ import wave
 from http import HTTPStatus
 from wsgiref.simple_server import make_server
 
+try:
+    from .features import application as feature_application
+except ImportError:
+    from features import application as feature_application
+
 MAX_FILE_BYTES = 4 * 1024 * 1024
 MAX_DURATION_SECONDS = 180
 ANALYSIS_RATE = 100
@@ -142,6 +147,8 @@ def application(environ, start_response):
     method = environ.get("REQUEST_METHOD", "GET").upper()
     path = environ.get("PATH_INFO", "")
 
+    if path == "/api/features":
+        return feature_application(environ, start_response)
     if method == "GET" and path == "/api/health":
         return respond(start_response, 200, {"status": "ok"})
     if method != "POST":

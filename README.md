@@ -7,13 +7,23 @@ Songo estima los BPM de una grabación para ayudar a músicos a estudiar su prop
 
 ## Probarlo
 
-No necesitas instalar nada: abre la aplicación, elige un audio y pulsa **Analizar tempo**. También puedes arrastrar el archivo a la zona de carga.
+No necesitas instalar nada: abre la aplicación, elige un audio y pulsa **Analizar tempo**. En móvil puedes seleccionarlo desde el dispositivo o grabar un fragmento con el micrófono. También puedes arrastrar un archivo desde un ordenador.
 
 Se aceptan WAV, MP3, M4A, AAC, OGG, FLAC y algunos contenedores de audio/video, siempre que el navegador pueda decodificarlos. El límite del archivo original es **50 MB** y la duración máxima, **3 minutos**.
 
 El original se decodifica en el navegador. Antes de enviarlo, Songo crea una versión mono WAV de 11.025 Hz: un minuto ocupa unos 1,3 MB, así que no hace falta recortar una canción WAV de 11 MB solo para probarla. La API recibe únicamente esa copia reducida; no almacena el archivo.
 
 La decodificación depende del navegador y del códec instalado. Si un formato no se puede abrir, prueba a exportarlo como MP3 o WAV.
+
+La grabación solicita permiso al micrófono, dura hasta tres minutos y se procesa como un archivo local; no empieza a enviarse hasta que pulsas **Analizar tempo**. El navegador debe permitir acceso al micrófono (HTTPS o `localhost`).
+
+Puedes alternar entre tema oscuro y claro desde la barra superior. El diseño se adapta a pantallas pequeñas y a controles táctiles.
+
+## Cuenta y funciones modulares
+
+El BPM y la grabación están disponibles sin cuenta. Acordes, similitud y biblioteca aparecen como funciones futuras que requerirán una cuenta. El inicio de sesión de esta maqueta solo crea una sesión JSON en `sessionStorage` para esta pestaña: no verifica el correo, no usa contraseñas y no protege rutas ni datos. No introduzcas información sensible. Para producción hay que sustituirlo por autenticación de servidor y sesiones seguras antes de dar acceso a funciones privadas.
+
+El catálogo de capacidades se mantiene en `src/features.js` y se publica desde `GET /api/features`. Se puede cambiar el manifiesto en el backend con `SONGO_ENABLED_FEATURES=bpm,recording`; las rutas del balanceador pueden dirigir cada API a su servicio cuando ese módulo exista. Una bandera solo anuncia disponibilidad: no implementa por sí sola la lógica de acordes, similitud o biblioteca.
 
 ## Qué hace el análisis
 
@@ -27,6 +37,7 @@ Esta versión aún no detecta acordes ni tonalidad y no compara canciones. Una f
 - La API acepta WAV PCM, comprueba el contenido real y limita la petición a 4 MB.
 - En servidor se acotan canales, frecuencia de muestreo y duración; los errores se devuelven como JSON.
 - El backend no escribe el audio a disco, registra nombres de archivo ni usa servicios externos.
+- Las sesiones JSON de esta maqueta son estado de demostración del navegador y no constituyen un mecanismo de autenticación.
 - El despliegue incluye CSP, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` y `Permissions-Policy`.
 
 El análisis puede producir BPM incorrectos; no se debe interpretar como una identificación de canción ni como evidencia legal de plagio.
@@ -60,7 +71,7 @@ npm run build
 
 ## Próximos pasos
 
-1. Probar el estimador con grabaciones etiquetadas y mostrar cuándo la estimación es poco fiable.
-2. Añadir acordes y tonalidad.
+1. Reemplazar la sesión de demostración por autenticación de servidor y una base de datos.
+2. Implementar acordes y tonalidad detrás del sistema de módulos.
 3. Investigar huellas musicales y similitud usando un catálogo autorizado.
 4. Explorar letras y fuentes de reproducción con sus permisos y atribuciones correspondientes.
