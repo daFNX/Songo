@@ -1,9 +1,9 @@
 # Songo
 
-Songo estima los BPM de una grabación para ayudar a músicos a estudiar su propio material. Esta primera versión hace una sola cosa: recibe audio, estima el pulso y muestra el resultado.
+Songo es un espacio de análisis musical para músicos. Esta primera versión estima los BPM de tus grabaciones; la detección de acordes y la comparación de patrones están en desarrollo.
 
 - **Probar:** [songo-jet.vercel.app](https://songo-jet.vercel.app)
-- **Código:** [github.com/daFNX/Songo_web](https://github.com/daFNX/Songo_web)
+- **Código:** [github.com/daFNX/Songo](https://github.com/daFNX/Songo)
 
 ## Probarlo
 
