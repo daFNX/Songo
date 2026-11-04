@@ -3,6 +3,9 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useAudioAnalyzer } from './composables/useAudioAnalyzer'
 import { useAuthSession } from './composables/useAuthSession'
 import { FEATURES, mergeFeatureConfig } from './features'
+import { apiFetch } from './services/api'
+import AudioWaveform from './components/AudioWaveform.vue'
+import TipsPage from './components/TipsPage.vue'
 
 const {
   selectedFile,
@@ -15,6 +18,9 @@ const {
   recordingState,
   recordingSeconds,
   recordingError,
+  previewPeaks,
+  isPreviewLoading,
+  previewError,
   isRecording,
   fileSize,
   fileFormat,
@@ -22,21 +28,26 @@ const {
   onDrop,
   analyze,
   clearFile,
+  showHistoryResult,
   startRecording,
   stopRecording,
 } = useAudioAnalyzer()
 const { session, sessionError, isSessionLoading, signIn, signOut } = useAuthSession()
-const routeNames = new Set(['inicio', 'analizador', 'historial'])
+const routeNames = new Set(['inicio', 'analizador', 'historial', 'consejos', 'admin'])
 function readPage() {
+  if (window.location.hash === '#como-funciona') return 'inicio'
   const page = window.location.hash.replace(/^#\/?/, '').split('/')[0] || 'inicio'
-  return routeNames.has(page) ? page : 'inicio'
+  return routeNames.has(page) ? page : '404'
 }
 const currentPage = ref(readPage())
 const featureItems = ref(FEATURES)
 const featureConfigMessage = ref('')
 const authConfigured = ref(false)
-const isLightMode = ref(false)
+const isLightMode = ref(document.documentElement.dataset.theme === 'light')
+const isOnline = ref(navigator.onLine)
 const isAuthOpen = ref(false)
+const isAuthSubmitting = ref(false)
+const appError = ref('')
 const authEmail = ref('')
 const authPassword = ref('')
 const authMode = ref('login')
@@ -44,9 +55,20 @@ const authDialog = ref(null)
 const historyItems = ref([])
 const historyError = ref('')
 const historyLoading = ref(false)
+const historyActionMessage = ref('')
+const deletedHistoryItem = ref(null)
+const deletingHistoryId = ref('')
+const isUndoingDelete = ref(false)
+const isAnalysisDetailsOpen = ref(false)
+const expandedHistoryId = ref('')
+const displayedBpm = ref(0)
+let undoDeleteTimer
+let historyActionTimer
+let bpmCounterFrame
 const bpmEnabled = computed(() => featureItems.value.some((feature) => feature.id === 'bpm' && feature.enabled && feature.available))
 const recordingEnabled = computed(() => featureItems.value.some((feature) => feature.id === 'recording' && feature.enabled && feature.available))
 const futureFeatures = computed(() => featureItems.value.filter((feature) => !['bpm', 'recording'].includes(feature.id)))
+const currentYear = new Date().getFullYear()
 const recordingTime = computed(() => {
   const minutes = Math.floor(recordingSeconds.value / 60)
   const seconds = String(recordingSeconds.value % 60).padStart(2, '0')
@@ -55,6 +77,9 @@ const recordingTime = computed(() => {
 
 function updatePage() {
   currentPage.value = readPage()
+  if (window.location.hash === '#como-funciona') {
+    nextTick(() => document.getElementById('como-funciona')?.scrollIntoView({ behavior: 'smooth' }))
+  }
 }
 
 function navigateTo(page) {
@@ -68,7 +93,40 @@ function navigateTo(page) {
 }
 
 window.addEventListener('hashchange', updatePage)
-onBeforeUnmount(() => window.removeEventListener('hashchange', updatePage))
+function updateOnlineStatus() {
+  isOnline.value = navigator.onLine
+}
+window.addEventListener('online', updateOnlineStatus)
+window.addEventListener('offline', updateOnlineStatus)
+function handleAppError() {
+  appError.value = 'Ocurrió un error inesperado. Recarga la página o inténtalo de nuevo.'
+}
+window.addEventListener('songo:app-error', handleAppError)
+onBeforeUnmount(() => {
+  window.removeEventListener('hashchange', updatePage)
+  window.removeEventListener('online', updateOnlineStatus)
+  window.removeEventListener('offline', updateOnlineStatus)
+  window.removeEventListener('songo:app-error', handleAppError)
+  clearTimeout(undoDeleteTimer)
+  clearTimeout(historyActionTimer)
+  cancelAnimationFrame(bpmCounterFrame)
+})
+
+watch(() => result.value?.bpm, (target) => {
+  cancelAnimationFrame(bpmCounterFrame)
+  if (!Number.isFinite(target)) {
+    displayedBpm.value = 0
+    return
+  }
+  const startedAt = performance.now()
+  const duration = 800
+  function count(timestamp) {
+    const progress = Math.min(1, (timestamp - startedAt) / duration)
+    displayedBpm.value = Math.round(target * (1 - (1 - progress) ** 3))
+    if (progress < 1) bpmCounterFrame = requestAnimationFrame(count)
+  }
+  bpmCounterFrame = requestAnimationFrame(count)
+})
 
 function formatChordTime(seconds) {
   const minutes = Math.floor(seconds / 60)
@@ -78,6 +136,11 @@ function formatChordTime(seconds) {
 
 watch(isLightMode, (enabled) => {
   document.documentElement.dataset.theme = enabled ? 'light' : 'dark'
+  try {
+    localStorage.setItem('songo-theme', enabled ? 'light' : 'dark')
+  } catch {
+    // Theme persistence is optional when browser storage is unavailable.
+  }
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', enabled ? '#f7f2f0' : '#101011')
 }, { immediate: true })
 
@@ -95,9 +158,18 @@ watch([currentPage, session, isSessionLoading], ([page, user, loading]) => {
   }
 }, { immediate: true })
 
+watch([currentPage, session, isSessionLoading], ([page, user, loading]) => {
+  if (page !== 'admin' || loading) return
+  if (!user) openSignIn()
+  else if (user.role !== 'admin') {
+    appError.value = 'La administración requiere una cuenta con rol de administrador.'
+    navigateTo('consejos')
+  }
+}, { immediate: true })
+
 async function loadFeatureConfig() {
   try {
-    const response = await fetch('/api/features')
+    const response = await apiFetch('/api/features')
     if (!response.ok) throw new Error('No se pudo consultar el catálogo de funciones.')
     const data = await response.json()
     featureItems.value = mergeFeatureConfig(data.features)
@@ -114,10 +186,17 @@ function openSignIn() {
 }
 
 async function submitSignIn() {
-  if (await signIn(authEmail.value, authPassword.value, authMode.value === 'register')) {
-    isAuthOpen.value = false
-    authEmail.value = ''
-    authPassword.value = ''
+  if (isAuthSubmitting.value || !isOnline.value) return
+  isAuthSubmitting.value = true
+  authEmail.value = authEmail.value.trim().toLowerCase()
+  try {
+    if (await signIn(authEmail.value, authPassword.value, authMode.value === 'register')) {
+      isAuthOpen.value = false
+      authEmail.value = ''
+      authPassword.value = ''
+    }
+  } finally {
+    isAuthSubmitting.value = false
   }
 }
 
@@ -137,7 +216,7 @@ async function loadHistory() {
   historyLoading.value = true
   historyError.value = ''
   try {
-    const response = await fetch('/api/history?limit=20', { credentials: 'same-origin' })
+    const response = await apiFetch('/api/history?limit=20', { credentials: 'same-origin' })
     const payload = await response.json()
     if (!response.ok) throw new Error(payload.error || 'No pudimos consultar tu historial.')
     historyItems.value = payload.items
@@ -146,6 +225,103 @@ async function loadHistory() {
     historyError.value = error.message || 'No pudimos consultar tu historial.'
   } finally {
     historyLoading.value = false
+  }
+}
+
+function chordNotes(chord) {
+  const match = /^([A-G]#?)(m?)$/.exec(chord)
+  if (!match) return 'Toca para ver la estructura del acorde.'
+  const pitches = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+  const root = pitches.indexOf(match[1])
+  const intervals = match[2] ? [0, 3, 7] : [0, 4, 7]
+  return `Notas: ${intervals.map((interval) => pitches[(root + interval) % 12]).join(', ')}`
+}
+
+function tempoCharacter(bpm) {
+  if (bpm < 60) return 'Lento · balada, ambient o espacio para una interpretación amplia.'
+  if (bpm < 80) return 'Relajado · útil para grooves tranquilos y frases con aire.'
+  if (bpm < 100) return 'Medio · un terreno flexible para pop, hip-hop y canción.'
+  if (bpm < 120) return 'En movimiento · puede dar energía sin perder claridad.'
+  if (bpm < 140) return 'Enérgico · prueba subdivisiones para que el pulso no se sienta rígido.'
+  return 'Rápido · organiza acentos y respiraciones para mantener la interpretación cómoda.'
+}
+
+function practiceIdeas(item) {
+  const ideas = [
+    `Ensaya a ${Math.max(1, Math.round(item.bpm / 2))} BPM y a ${Math.min(300, item.bpm * 2)} BPM: la lectura puede corresponder a un pulso percibido a mitad o doble tiempo.`,
+  ]
+  if (item.key) ideas.push(`Toma ${item.key} como hipótesis; comprueba la nota de reposo con el bajo y la melodía antes de armonizar.`)
+  if (item.chords?.length) ideas.push('Prueba la secuencia detectada con otra inversión o ritmo armónico; contrasta cada acorde con la grabación.')
+  if (item.similarity_matches?.length) ideas.push('Revisa las coincidencias solo como parecido acústico con el catálogo autorizado; no indican plagio ni una conclusión legal.')
+  return ideas
+}
+
+function exportHistory(item) {
+  const json = JSON.stringify(item, null, 2)
+  const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `songo-analisis-${item.id}.json`
+  link.click()
+  setTimeout(() => URL.revokeObjectURL(url), 0)
+}
+
+function loadHistoryResult(item) {
+  showHistoryResult(item)
+  navigateTo('analizador')
+}
+
+async function deleteHistory(item) {
+  if (deletingHistoryId.value || deletedHistoryItem.value || !isOnline.value) return
+  deletingHistoryId.value = item.id
+  historyActionMessage.value = ''
+  try {
+    const response = await apiFetch('/api/history', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'delete', id: item.id }),
+    })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.error || 'No pudimos quitar este análisis.')
+    clearTimeout(undoDeleteTimer)
+    deletedHistoryItem.value = item
+    historyItems.value = historyItems.value.filter((historyItem) => historyItem.id !== item.id)
+    historyActionMessage.value = 'Análisis eliminado. Puedes deshacerlo durante 10 segundos.'
+    undoDeleteTimer = setTimeout(() => {
+      deletedHistoryItem.value = null
+      historyActionMessage.value = ''
+    }, 10000)
+  } catch (error) {
+    historyActionMessage.value = error.message || 'No pudimos quitar este análisis.'
+  } finally {
+    deletingHistoryId.value = ''
+  }
+}
+
+async function undoDelete() {
+  const item = deletedHistoryItem.value
+  if (!item || isUndoingDelete.value || !isOnline.value) return
+  clearTimeout(undoDeleteTimer)
+  isUndoingDelete.value = true
+  try {
+    const response = await apiFetch('/api/history', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'restore', id: item.id }),
+    })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.error || 'Ya no se puede restaurar este análisis.')
+    historyItems.value = [item, ...historyItems.value].slice(0, 20)
+    historyActionMessage.value = 'Análisis restaurado.'
+    deletedHistoryItem.value = null
+    clearTimeout(historyActionTimer)
+    historyActionTimer = setTimeout(() => { historyActionMessage.value = '' }, 4000)
+  } catch (error) {
+    historyActionMessage.value = error.message || 'No pudimos restaurar este análisis.'
+  } finally {
+    isUndoingDelete.value = false
   }
 }
 
@@ -161,6 +337,10 @@ loadFeatureConfig()
 
 <template>
   <div class="page-shell">
+    <p v-if="appError" class="app-error-notice" role="alert">{{ appError }}</p>
+    <p v-if="!isOnline" class="offline-notice" role="status" aria-live="polite">
+      Estás sin conexión. No enviaremos solicitudes; tus datos se conservan en este dispositivo.
+    </p>
     <header class="topbar">
       <a class="wordmark" href="#/inicio" aria-label="Songo, inicio">
         <span class="brand-mark" aria-hidden="true">
@@ -175,14 +355,16 @@ loadFeatureConfig()
         <div class="app-nav">
           <a class="topbar-link" href="#/inicio" :aria-current="currentPage === 'inicio' ? 'page' : undefined">Inicio</a>
           <a class="topbar-link" href="#/analizador" :aria-current="currentPage === 'analizador' ? 'page' : undefined">Analizador</a>
+          <a class="topbar-link" href="#/consejos" :aria-current="currentPage === 'consejos' ? 'page' : undefined">Consejos</a>
           <a v-if="session" class="topbar-link" href="#/historial" :aria-current="currentPage === 'historial' ? 'page' : undefined">Historial</a>
+          <a v-if="session?.role === 'admin'" class="topbar-link admin-nav-link" href="#/admin" :aria-current="currentPage === 'admin' ? 'page' : undefined">Admin</a>
         </div>
         <button class="utility-button theme-toggle" type="button" :aria-pressed="isLightMode" @click="isLightMode = !isLightMode">
           <span aria-hidden="true">{{ isLightMode ? '☾' : '☼' }}</span>
           <span>{{ isLightMode ? 'Modo oscuro' : 'Modo claro' }}</span>
         </button>
         <span v-if="session" class="session-name">{{ session.email }}</span>
-        <button v-if="session" class="utility-button account-button" type="button" @click="handleSignOut">Salir</button>
+        <button v-if="session" class="utility-button account-button" type="button" :disabled="!isOnline" @click="handleSignOut">Salir</button>
         <button v-else class="utility-button account-button" type="button" :disabled="isSessionLoading" @click="openSignIn">
           {{ isSessionLoading ? 'Verificando…' : 'Entrar' }}
         </button>
@@ -207,9 +389,9 @@ loadFeatureConfig()
           <h2 id="home-how-title">De la grabación a una idea más clara.</h2>
         </div>
         <div class="steps">
-          <article class="step"><span class="step-number">01</span><h3>Comparte tu audio</h3><p>Elige una grabación de hasta 50 MB o toma una idea con el micrófono.</p></article>
-          <article class="step"><span class="step-number">02</span><h3>Preparamos la escucha</h3><p>El navegador crea una copia ligera; el servidor Python estima sus patrones.</p></article>
-          <article class="step"><span class="step-number">03</span><h3>Explora tus resultados</h3><p>Consulta tempo y, al iniciar sesión y habilitarlo, armonía e historial privado.</p></article>
+          <article class="step glass-card"><span class="step-number">01</span><h3>Comparte tu audio</h3><p>Elige una grabación de hasta 50 MB o toma una idea con el micrófono.</p></article>
+          <article class="step glass-card"><span class="step-number">02</span><h3>Preparamos la escucha</h3><p>El navegador crea una copia ligera; el servidor Python estima sus patrones.</p></article>
+          <article class="step glass-card"><span class="step-number">03</span><h3>Explora tus resultados</h3><p>Consulta tempo y, al iniciar sesión y habilitarlo, armonía e historial privado.</p></article>
         </div>
       </section>
 
@@ -238,7 +420,7 @@ loadFeatureConfig()
         <p class="intro-copy">Sube una grabación y descubre su tempo en segundos.<br class="desktop-break" /> Tu música, sin dudas.</p>
       </section>
 
-      <section class="workspace" aria-label="Analizador de tempo">
+      <section class="workspace glass-card" aria-label="Analizador de tempo">
         <div class="section-heading">
           <div>
             <p class="section-index">01 <span>/</span> ANÁLISIS</p>
@@ -270,12 +452,21 @@ loadFeatureConfig()
                 @change="onInputChange"
               />
               <template v-if="selectedFile">
-                <div class="file-icon" aria-hidden="true">
-                  <svg viewBox="0 0 24 24" fill="none"><path d="M13.5 3.75H7.75a2 2 0 0 0-2 2v12.5a2 2 0 0 0 2 2h8.5a2 2 0 0 0 2-2V8.5l-4.75-4.75Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M13.5 4v4.5H18M8.5 13h7M8.5 16h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-                </div>
                 <div class="file-details">
-                  <span class="file-name">{{ selectedFile.name }}</span>
-                  <span class="file-meta">{{ fileSize }} <span>·</span> {{ fileFormat }}</span>
+                  <div class="file-widget-heading">
+                    <div class="file-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none"><path d="M13.5 3.75H7.75a2 2 0 0 0-2 2v12.5a2 2 0 0 0 2 2h8.5a2 2 0 0 0 2-2V8.5l-4.75-4.75Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M13.5 4v4.5H18M8.5 13h7M8.5 16h5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                    </div>
+                    <div class="file-details-text">
+                      <span class="file-name">{{ selectedFile.name }}</span>
+                      <span class="file-meta">{{ fileFormat }} <span>·</span> {{ fileSize }}</span>
+                    </div>
+                  </div>
+                  <div class="preview-waveform" role="img" :aria-label="isPreviewLoading ? 'Preparando forma de onda' : 'Vista previa de la forma de onda'">
+                    <span v-for="(height, index) in previewPeaks" :key="index" :style="{ height: `${height}%` }"></span>
+                    <span v-if="isPreviewLoading" class="preview-waveform-loading">Preparando vista previa…</span>
+                  </div>
+                  <span v-if="previewError" class="preview-error">{{ previewError }}</span>
                 </div>
                 <button class="remove-file" type="button" aria-label="Quitar archivo" :disabled="isAnalyzing" @click="clearFile">×</button>
               </template>
@@ -345,16 +536,22 @@ loadFeatureConfig()
               <span v-else-if="isAnalyzing" class="result-tag is-working"><span></span> EN PROCESO</span>
               <span v-else class="result-tag is-idle"><span></span> EN ESPERA</span>
             </div>
-            <div v-if="result" class="bpm-reading">
-              <span class="bpm-number">{{ result.bpm }}</span><span class="bpm-unit">BPM</span>
+            <div v-if="result || isAnalyzing" class="bpm-reading" :class="{ 'is-counting': isAnalyzing }">
+              <span class="bpm-number">{{ isAnalyzing ? '···' : displayedBpm }}</span><span class="bpm-unit">BPM</span>
             </div>
             <div v-else class="bpm-placeholder">—<span>BPM</span></div>
-            <p v-if="result" class="result-caption">Pulsos por minuto <span>·</span> {{ result.duration }}</p>
+            <p v-if="result" class="result-caption">
+              {{ result.source === 'history' ? 'Resultado guardado en tu historial' : `Pulsos por minuto · ${result.duration}` }}
+            </p>
+            <p v-else-if="isAnalyzing" class="result-caption">Midiendo el pulso de tu grabación…</p>
             <p v-else class="result-caption">Tu resultado aparecerá aquí</p>
 
-            <div class="waveform" :class="{ 'waveform-active': result || isAnalyzing }" aria-hidden="true">
-              <span v-for="(height, index) in [14, 23, 17, 31, 22, 42, 29, 50, 34, 61, 38, 49, 25, 57, 35, 68, 42, 55, 31, 47, 25, 59, 39, 71, 43, 56, 30, 48, 22, 62, 36, 52, 28, 44, 19, 35, 24]" :key="index" :class="height < 25 ? 'wave-short' : height < 46 ? 'wave-medium' : 'wave-tall'"></span>
-            </div>
+            <AudioWaveform
+              class="waveform"
+              :peaks="previewPeaks"
+              :bpm="result?.bpm || 120"
+              :active="Boolean(isAnalyzing || result)"
+            />
 
             <div v-if="result" class="result-footnote">
               <span class="result-footnote-mark">✳</span>
@@ -388,6 +585,36 @@ loadFeatureConfig()
               Inicia sesión para consultar acordes, tonalidad y análisis guardados.
               <button class="browse-button" type="button" @click="openSignIn">Entrar</button>
             </p>
+            <section v-if="result && !isAnalyzing" class="analysis-insights" aria-labelledby="insights-title">
+              <button
+                class="insights-toggle"
+                type="button"
+                :aria-expanded="isAnalysisDetailsOpen"
+                @click="isAnalysisDetailsOpen = !isAnalysisDetailsOpen"
+              >
+                <span><span class="insights-icon" aria-hidden="true">✳</span> Guía para llevarlo a tu música</span>
+                <span class="insights-toggle-icon" aria-hidden="true">{{ isAnalysisDetailsOpen ? '−' : '+' }}</span>
+              </button>
+              <div v-if="isAnalysisDetailsOpen" class="insights-content">
+                <h3 id="insights-title">Qué puedes explorar</h3>
+                <p class="tempo-reading"><strong>{{ result.bpm }} BPM</strong> · {{ tempoCharacter(result.bpm) }}</p>
+                <ul>
+                  <li v-for="idea in practiceIdeas(result)" :key="idea">{{ idea }}</li>
+                </ul>
+                <div v-if="result.chords?.length" class="insights-chords">
+                  <span class="insights-label">SECUENCIA ESTIMADA</span>
+                  <span
+                    v-for="(chord, index) in result.chords"
+                    :key="`${chord.start_seconds}-${index}`"
+                    class="chord-chip"
+                    tabindex="0"
+                    :data-notes="chordNotes(chord.chord)"
+                    :aria-label="`${chord.chord}, ${chordNotes(chord.chord)}`"
+                  >{{ chord.chord }} <small>{{ formatChordTime(chord.start_seconds) }}</small></span>
+                </div>
+                <p class="insights-disclaimer">Son referencias automáticas para inspirar y contrastar con tu oído; no sustituyen una escucha ni una transcripción verificada.</p>
+              </div>
+            </section>
           </div>
         </div>
       </section>
@@ -429,7 +656,7 @@ loadFeatureConfig()
         </div>
         <p v-if="featureConfigMessage" class="feature-config-message" role="status">{{ featureConfigMessage }}</p>
         <div class="feature-grid">
-          <article v-for="feature in futureFeatures" :key="feature.id" class="feature-card">
+          <article v-for="feature in futureFeatures" :key="feature.id" class="feature-card glass-card">
             <div class="feature-card-top">
               <span class="feature-symbol" aria-hidden="true">{{ feature.id === 'chords' ? '⌁' : feature.id === 'similarity' ? '◎' : '▤' }}</span>
               <span
@@ -476,7 +703,7 @@ loadFeatureConfig()
         <h1 id="history-title">Tu música, <span>en perspectiva.</span></h1>
         <p class="intro-copy">Los análisis guardados en tu cuenta, listos para volver a escuchar.</p>
       </section>
-      <section class="history-list history-page-list" aria-live="polite" aria-labelledby="history-list-title">
+      <section class="history-list history-page-list glass-card" aria-live="polite" aria-labelledby="history-list-title">
         <div class="history-heading">
           <div>
             <p class="section-index">01 <span>/</span> HISTORIAL</p>
@@ -485,16 +712,41 @@ loadFeatureConfig()
           <a class="secondary-cta" href="#/analizador">Nuevo análisis ↗</a>
         </div>
         <p v-if="!session" class="history-empty">Inicia sesión para consultar tu biblioteca privada.</p>
-        <p v-else-if="historyLoading" class="history-empty" role="status">Cargando tus análisis…</p>
+        <div v-else-if="historyLoading" class="history-skeletons" role="status" aria-label="Cargando tus análisis">
+          <span v-for="item in 3" :key="item" class="history-skeleton" aria-hidden="true"></span>
+        </div>
         <p v-else-if="historyError" class="auth-error" role="alert">{{ historyError }}</p>
-        <p v-else-if="!historyItems.length" class="history-empty">Todavía no hay análisis guardados. Analiza una grabación para empezar tu biblioteca.</p>
-        <article v-for="item in historyItems" :key="item.id" class="history-item">
-          <div class="history-result-main">
-            <strong>{{ item.bpm }} BPM<span v-if="item.key"> · {{ item.key }}</span></strong>
-            <span>{{ new Date(item.created_at).toLocaleString() }}</span>
+        <p v-if="!historyItems.length && !historyLoading && !historyError" class="history-empty">Todavía no hay análisis guardados. Analiza una grabación para empezar tu biblioteca.</p>
+        <div v-if="historyActionMessage" class="history-toast" role="status" aria-live="polite">
+          <span>{{ historyActionMessage }}</span>
+          <button v-if="deletedHistoryItem" class="history-undo" type="button" :disabled="!isOnline || isUndoingDelete" @click="undoDelete">
+            {{ isUndoingDelete ? 'Restaurando…' : 'Deshacer' }}
+          </button>
+        </div>
+        <article v-for="item in historyItems" :key="item.id" class="history-item glass-card">
+          <div class="history-item-heading">
+            <div class="history-result-main">
+              <strong>{{ item.bpm }} BPM</strong>
+              <span v-if="item.key" class="key-badge">{{ item.key }}</span>
+              <time :datetime="item.created_at">{{ new Date(item.created_at).toLocaleString() }}</time>
+            </div>
+            <div class="history-actions" :aria-label="`Acciones para análisis de ${item.bpm} BPM`">
+              <button type="button" class="history-action" :disabled="deletingHistoryId === item.id || !isOnline" @click="exportHistory(item)">Exportar JSON</button>
+              <button type="button" class="history-action" :disabled="deletingHistoryId === item.id" @click="loadHistoryResult(item)">Cargar en analizador</button>
+              <button type="button" class="history-action is-destructive" :disabled="deletingHistoryId === item.id || Boolean(deletedHistoryItem) || !isOnline" @click="deleteHistory(item)">
+                {{ deletingHistoryId === item.id ? 'Eliminando…' : 'Eliminar' }}
+              </button>
+            </div>
           </div>
           <div v-if="item.chords?.length" class="history-chords" aria-label="Acordes detectados">
-            <span v-for="(chord, index) in item.chords" :key="`${chord.start_seconds}-${index}`">
+            <span
+              v-for="(chord, index) in item.chords"
+              :key="`${chord.start_seconds}-${index}`"
+              class="chord-chip"
+              tabindex="0"
+              :data-notes="chordNotes(chord.chord)"
+              :aria-label="`${chord.chord}, ${chordNotes(chord.chord)}`"
+            >
               {{ chord.chord }} <small>{{ formatChordTime(chord.start_seconds) }}</small>
             </span>
           </div>
@@ -503,15 +755,90 @@ loadFeatureConfig()
               {{ match.artist }} — {{ match.title }} · {{ match.similarity_percent }}%
             </span>
           </div>
+          <button
+            class="history-detail-toggle"
+            type="button"
+            :aria-expanded="expandedHistoryId === item.id"
+            @click="expandedHistoryId = expandedHistoryId === item.id ? '' : item.id"
+          >
+            {{ expandedHistoryId === item.id ? 'Ocultar guía del análisis' : 'Ver detalles y guía musical' }}
+            <span aria-hidden="true">{{ expandedHistoryId === item.id ? '−' : '+' }}</span>
+          </button>
+          <section v-if="expandedHistoryId === item.id" class="history-detail-panel" :aria-label="`Detalles del análisis de ${item.bpm} BPM`">
+            <div class="history-detail-stats">
+              <div><span>TEMPO</span><strong>{{ item.bpm }} BPM</strong><small>{{ tempoCharacter(item.bpm).split(' · ')[0] }}</small></div>
+              <div v-if="item.key"><span>TONALIDAD ESTIMADA</span><strong>{{ item.key }}</strong><small>Confirma la nota de reposo con tu instrumento.</small></div>
+              <div><span>CAMBIO DE TEMPO</span><strong>{{ Math.max(1, Math.round(item.bpm / 2)) }} / {{ Math.min(300, item.bpm * 2) }} BPM</strong><small>Explora medio tiempo y doble tiempo.</small></div>
+            </div>
+            <div v-if="item.chords?.length" class="history-detail-chord-list">
+              <span class="insights-label">ACORDES EN LA LÍNEA DE TIEMPO</span>
+              <span
+                v-for="(chord, index) in item.chords"
+                :key="`${chord.start_seconds}-${index}`"
+                class="chord-chip"
+                tabindex="0"
+                :data-notes="chordNotes(chord.chord)"
+                :aria-label="`${chord.chord}, ${chordNotes(chord.chord)}`"
+              >{{ chord.chord }} <small>{{ formatChordTime(chord.start_seconds) }}</small></span>
+            </div>
+            <ul class="history-practice-ideas">
+              <li v-for="idea in practiceIdeas(item)" :key="idea">{{ idea }}</li>
+            </ul>
+            <p class="insights-disclaimer">La tonalidad y los acordes son aproximaciones automáticas. Las coincidencias acústicas no determinan plagio ni una conclusión legal.</p>
+          </section>
         </article>
         <p class="session-disclaimer">Las coincidencias comparan rasgos con el catálogo autorizado; no son una evaluación legal de plagio.</p>
       </section>
     </main>
 
-    <footer class="footer">
-      <a class="footer-wordmark" href="#/inicio">songo<span>.</span></a>
-      <span>Tu música, sin dudas.</span>
-      <span class="footer-meta">Hecho para quienes hacen música <span aria-hidden="true">♡</span></span>
+    <TipsPage
+      v-else-if="currentPage === 'consejos' || currentPage === 'admin'"
+      :user="session"
+      :is-online="isOnline"
+      :admin-view="currentPage === 'admin'"
+    />
+
+    <main v-else-if="currentPage === '404'" class="not-found-page" aria-labelledby="not-found-title">
+      <p class="section-index">ERROR 404</p>
+      <h1 id="not-found-title">No encontramos esa página.</h1>
+      <a class="analyze-button home-cta" href="#/inicio">Volver al inicio</a>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-shell">
+        <div class="footer-brand-row">
+          <a class="footer-wordmark" href="#/inicio">songo<span>.</span></a>
+          <p>Tu música, sin dudas.<br /><span>Una herramienta para escuchar con intención y crear con confianza.</span></p>
+          <a class="footer-contact-link" href="#/consejos">Ideas para tu próxima sesión <span aria-hidden="true">↗</span></a>
+        </div>
+        <div class="footer-columns">
+          <section>
+            <h2>Explora Songo</h2>
+            <a href="#/inicio">Inicio</a>
+            <a href="#/consejos">Consejos musicales</a>
+            <a href="#como-funciona">Cómo funciona</a>
+          </section>
+          <section>
+            <h2>Herramientas</h2>
+            <a href="#/analizador">Analizador de audio</a>
+            <a v-if="session" href="#/historial">Mi historial</a>
+            <a v-if="session?.role === 'admin'" href="#/admin">Administración</a>
+          </section>
+          <section>
+            <h2>Para tu proceso</h2>
+            <p>Tempo, armonía y ejercicios para productores, compositores y músicos.</p>
+          </section>
+          <section>
+            <h2>Una escucha honesta</h2>
+            <p>Las estimaciones orientan; la decisión musical siempre es tuya.</p>
+            <span class="footer-social-label"><span class="status-dot"></span> Creado para quienes hacen música</span>
+          </section>
+        </div>
+        <div class="footer-bottom">
+          <span>© {{ currentYear }} Songo · Tu música, sin dudas.</span>
+          <span>Hecho para escuchar, aprender y crear <span aria-hidden="true">♡</span></span>
+        </div>
+      </div>
     </footer>
 
     <dialog
@@ -541,6 +868,8 @@ loadFeatureConfig()
           name="email"
           autocomplete="email"
           maxlength="254"
+          :aria-invalid="Boolean(sessionError)"
+          :aria-describedby="sessionError ? 'auth-error' : undefined"
           required
           autofocus
           placeholder="tu@correo.com"
@@ -554,13 +883,16 @@ loadFeatureConfig()
           :autocomplete="authMode === 'register' ? 'new-password' : 'current-password'"
           minlength="12"
           maxlength="128"
+          :aria-invalid="Boolean(sessionError)"
+          :aria-describedby="sessionError ? 'auth-error' : undefined"
           required
           placeholder="Mínimo 12 caracteres"
         />
-        <p v-if="sessionError" class="auth-error" role="alert">{{ sessionError }}</p>
-        <button class="analyze-button" type="submit" :disabled="!authConfigured">
-          {{ authMode === 'register' ? 'Crear cuenta segura' : 'Iniciar sesión' }}
-          <span class="button-arrow" aria-hidden="true">↗</span>
+        <p v-if="sessionError" id="auth-error" class="auth-error" role="alert">{{ sessionError }}</p>
+        <button class="analyze-button" type="submit" :disabled="!authConfigured || isAuthSubmitting || !isOnline">
+          <span v-if="isAuthSubmitting" class="spinner" aria-hidden="true"></span>
+          {{ isAuthSubmitting ? 'Procesando…' : authMode === 'register' ? 'Crear cuenta segura' : 'Iniciar sesión' }}
+          <span v-if="!isAuthSubmitting" class="button-arrow" aria-hidden="true">↗</span>
         </button>
       </form>
       <p class="dialog-disclaimer">En producción, la contraseña se envía por HTTPS y se almacena con Argon2id. La sesión usa una cookie HttpOnly.</p>

@@ -50,7 +50,7 @@ class SessionTokenTests(unittest.TestCase):
             cookie = auth._session_cookie("signed-token", 600)
 
         self.assertIn("; Secure", cookie)
-        self.assertIn("HttpOnly; SameSite=Lax", cookie)
+        self.assertIn("HttpOnly; SameSite=Strict", cookie)
 
 
 if __name__ == "__main__":

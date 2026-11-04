@@ -101,13 +101,13 @@ def _session_cookie(token, max_age):
     secure = "; Secure" if _is_production() else ""
     return (
         f"{cookie_name()}={token}; Max-Age={max_age}; Path=/; "
-        f"HttpOnly; SameSite=Lax{secure}"
+        f"HttpOnly; SameSite=Strict{secure}"
     )
 
 
 def clear_cookie():
     secure = "; Secure" if _is_production() else ""
-    return f"{cookie_name()}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax{secure}"
+    return f"{cookie_name()}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict{secure}"
 
 
 def _normalize_email(email):

@@ -10,6 +10,7 @@ La aplicación es un prototipo funcional. BPM y grabación están disponibles; a
 - `api/`: puntos de entrada HTTP para las funciones Python de Vercel.
 - `backend/`: gateway WSGI, autenticación, persistencia, análisis armónico y catálogo.
 - `db/schema.sql`: DDL de PostgreSQL.
+- `src/components/TipsPage.vue` y `backend/services/tips.py`: biblioteca de consejos y administración protegida por rol.
 - `tests/`: pruebas Python sin necesidad de credenciales de base de datos.
 - `vercel.json`: cabeceras de seguridad y límites de las funciones.
 
@@ -18,12 +19,17 @@ La aplicación es un prototipo funcional. BPM y grabación están disponibles; a
 - `/#/inicio`: presentación de Songo, su propósito y un tutorial breve.
 - `/#/analizador`: carga/grabación de audio, tempo, tonalidad y secuencia aproximada de acordes.
 - `/#/historial`: resultados guardados, protegidos por sesión y separados por usuario.
+- `/#/consejos`: biblioteca de ejercicios para músicos y productores, con filtros y búsqueda.
+- `/#/admin`: administración de consejos para cuentas con rol `admin`.
+- El historial permite exportar resultados como JSON, retomarlos en el analizador y borrar de forma reversible durante 10 segundos.
+- Los resultados del analizador y del historial se pueden expandir para consultar acordes con tiempos, tonalidad, medio/doble tempo y sugerencias prácticas.
+- Los consejos iniciales se cargan la primera vez que una cuenta admin abre el panel; al eliminar un consejo se marca como archivado en la base de datos.
 
 La comparación consulta únicamente entradas autorizadas cargadas por un usuario administrador. El catálogo de producción está inicialmente vacío; no se incorporan grabaciones de terceros automáticamente.
 
 En el flujo de audio, el navegador decodifica el archivo original y lo convierte a WAV PCM mono de 11.025 Hz. El archivo convertido, de hasta 4 MB, se envía al endpoint de análisis; el servidor valida tipo, duración, canales y frecuencia, procesa las muestras en memoria y limpia los buffers mutables al terminar. No se guarda el archivo de audio.
 
-Las cuentas usan contraseñas Argon2id y JWT firmados en cookies `HttpOnly`, con sesiones revocables persistidas en PostgreSQL. Las rutas privadas verifican la sesión y el usuario; el historial está aislado por propietario. Sin PostgreSQL y `JWT_SECRET` válidos, el login y las funciones dependientes permanecen desactivados, sin sesiones de demostración.
+Las cuentas usan contraseñas Argon2id y JWT firmados en cookies `HttpOnly`, `Secure` en producción y `SameSite=Strict`, con sesiones revocables persistidas en PostgreSQL. Las rutas privadas verifican la sesión y el usuario; el historial está aislado por propietario. Los intentos de autenticación y las solicitudes de análisis/catálogo se limitan por IP; con PostgreSQL el contador se comparte entre instancias y, en desarrollo sin base, se usa un límite local al proceso. Sin PostgreSQL y `JWT_SECRET` válidos, el login y las funciones dependientes permanecen desactivados, sin sesiones de demostración.
 
 ## Requisitos
 
@@ -54,6 +60,8 @@ Las cuentas usan contraseñas Argon2id y JWT firmados en cookies `HttpOnly`, con
    $env:DATABASE_URL = "postgresql://usuario:contraseña@host:5432/songo"
    psql "$env:DATABASE_URL" -f db\schema.sql
    ```
+
+   Si la base ya existía, el esquema añade de forma idempotente `analysis_history.deleted_at` para habilitar el borrado reversible.
 
    El servidor carga `.env` en desarrollo si existe; las variables ya definidas en el entorno tienen prioridad.
 
@@ -87,6 +95,7 @@ Las cuentas usan contraseñas Argon2id y JWT firmados en cookies `HttpOnly`, con
 | `DATABASE_CONNECT_TIMEOUT` | Tiempo máximo de conexión a la DB. |
 | `JWT_SECRET` | Secreto aleatorio de firma, de al menos 32 bytes. |
 | `JWT_ISSUER` | Emisor validado en los tokens. |
+| `APP_RATE_LIMIT_SECRET` | Clave opcional estable para firmar los identificadores de límite; por defecto se deriva de otro secreto del servidor. |
 | `SESSION_TTL_SECONDS` | Duración de la sesión del servidor. |
 | `PASSWORD_HASH_*` | Parámetros de costo de Argon2id. |
 | `SONGO_ENABLED_FEATURES` | Capacidades anunciadas: BPM, grabación, acordes, similitud e historial. |
@@ -107,6 +116,8 @@ No guardes `.env`, URLs de base con credenciales ni secretos en Git, capturas, l
 | `GET /api/auth/me` | Público | Consulta la sesión actual. |
 | `POST /api/auth/logout` | Sesión opcional | Revoca la sesión y expira la cookie. |
 | `GET /api/history` | Sesión requerida | Historial privado del usuario autenticado. |
+| `GET /api/tips` | Público | Consejos publicados; ofrece ejemplos de referencia si la base no está configurada. |
+| `POST /api/tips` | Rol `admin` | Guarda/edita o elimina consejos de la biblioteca musical. |
 | `POST /api/catalog` | Rol `admin` | Incorpora una referencia solo con datos de autorización y licencia. |
 | `GET /api/health` | Público | Comprobación básica del proceso. |
 
@@ -135,6 +146,8 @@ El registro público siempre crea usuarios con rol `user`; no existe contraseña
 3. Revisa el correo que muestra el script y escribe literalmente `PROMOTE correo@ejemplo.com` para confirmar. El script usa una transacción y un bloqueo de PostgreSQL; falla si la cuenta no existe o si ya hay cualquier administrador.
 
 El script no se despliega como endpoint y no crea cuentas ni contraseñas. Una vez que el primer administrador exista, no puede volver a usarse para promover otra cuenta. Guarda el acceso a la base como secreto; nunca incluyas su URI en argumentos, logs o commits.
+
+Con el rol aplicado, cierra sesión y vuelve a entrar. Abre `/#/admin` o usa el enlace **Admin** de la navegación para crear, editar, publicar, ocultar y eliminar consejos musicales. La administración requiere PostgreSQL y el esquema actualizado.
 
 ## Calidad y contribuciones
 

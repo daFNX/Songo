@@ -5,9 +5,11 @@ import os
 import struct
 import unittest
 import wave
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from api.analyze import application
+from backend.gateway import _enforce_rate_limit, _MEMORY_RATE_LIMITS
+from backend.services.errors import ApiError
 from backend.services.tempo import AnalysisError, analyze_wav
 
 
@@ -49,6 +51,71 @@ def request_api(method, path, body=b"", content_type=""):
 
 
 class AnalyzeWavTests(unittest.TestCase):
+    def test_in_memory_rate_limit_blocks_requests_after_limit(self):
+        _MEMORY_RATE_LIMITS.clear()
+        environ = {"REMOTE_ADDR": "192.0.2.10"}
+        with patch.dict(os.environ, {}, clear=True):
+            _enforce_rate_limit(environ, "test", limit=1)
+            with self.assertRaises(ApiError) as error:
+                _enforce_rate_limit(environ, "test", limit=1)
+
+        self.assertEqual(error.exception.status, 429)
+
+    def test_rate_limit_scopes_do_not_share_counters(self):
+        _MEMORY_RATE_LIMITS.clear()
+        environ = {"REMOTE_ADDR": "192.0.2.11"}
+        with patch.dict(os.environ, {}, clear=True):
+            _enforce_rate_limit(environ, "analysis", limit=1)
+            _enforce_rate_limit(environ, "login", limit=1)
+
+    def test_persistent_rate_limit_uses_database_counter(self):
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        cursor_context = connection.cursor.return_value
+        cursor = cursor_context.__enter__.return_value
+        cursor.fetchone.return_value = (1, False)
+        with patch("backend.gateway.configured", return_value=True):
+            with patch("backend.gateway.connect", return_value=connection):
+                with patch.dict(os.environ, {"APP_RATE_LIMIT_SECRET": "k" * 48}, clear=True):
+                    _enforce_rate_limit({"REMOTE_ADDR": "192.0.2.12"}, "analysis", limit=20)
+
+        statement, parameters = cursor.execute.call_args.args
+        self.assertIn("INSERT INTO auth_rate_limits", statement)
+        self.assertEqual(parameters[1:], (900, 900, 900, 20, 900))
+
+    def test_history_delete_is_owner_authenticated_and_reversible(self):
+        record_id = "3a37d640-3c88-498e-bfde-064cd51fbc65"
+        with patch("backend.gateway.auth.require_user", return_value={"id": "owner-id"}):
+            with patch("backend.gateway._enabled_feature_ids", return_value={"library"}):
+                with patch("backend.gateway._update_history_visibility", return_value=True) as update:
+                    response = request_api(
+                        "POST",
+                        "/api/history",
+                        json.dumps({"action": "delete", "id": record_id}).encode(),
+                        "application/json",
+                    )
+
+        self.assertEqual(response[0], 200)
+        update.assert_called_once_with(record_id, {"id": "owner-id"}, restore=False)
+
+    def test_history_restore_requires_valid_identifier(self):
+        with patch("backend.gateway.auth.require_user", return_value={"id": "owner-id"}):
+            with patch("backend.gateway._enabled_feature_ids", return_value={"library"}):
+                response = request_api(
+                    "POST",
+                    "/api/history",
+                    json.dumps({"action": "restore", "id": "not-a-uuid"}).encode(),
+                    "application/json",
+                )
+
+        self.assertEqual(response[0], 400)
+
+    def test_history_write_endpoint_rejects_other_http_methods(self):
+        response = request_api("DELETE", "/api/history")
+
+        self.assertEqual(response[0], 405)
+        self.assertEqual(response[1]["Allow"], "GET, POST")
+
     def test_estimates_synthetic_120_bpm(self):
         result = analyze_wav(make_wav())
         self.assertEqual(result["bpm"], 120)

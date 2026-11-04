@@ -1,3 +1,13 @@
+/**
+ * @typedef {Object} Feature
+ * @property {string} id
+ * @property {string} name
+ * @property {string} description
+ * @property {boolean} requiresAuth
+ * @property {boolean} enabled
+ * @property {boolean} available
+ */
+
 export const FEATURES = [
   {
     id: 'bpm',
@@ -41,6 +51,10 @@ export const FEATURES = [
   },
 ]
 
+/**
+ * @param {unknown} config
+ * @returns {Feature[]}
+ */
 export function mergeFeatureConfig(config) {
   if (!Array.isArray(config)) {
     throw new Error('La configuración de funciones no tiene un formato válido.')

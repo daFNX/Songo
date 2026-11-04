@@ -1,11 +1,17 @@
 import io
+import hashlib
+import hmac
 import json
 import os
+import secrets
+import threading
+import time
+import uuid
 import wave
 from http import HTTPStatus
 from urllib.parse import parse_qs
 
-from .services import auth, catalog
+from .services import auth, catalog, tips
 from .services.audio import analyze_music
 from .services.database import configured, connect
 from .services.errors import ApiError
@@ -21,6 +27,9 @@ FEATURES = (
 )
 DEFAULT_FEATURES = {"bpm", "recording", "chords"}
 KNOWN_FEATURES = {item["id"] for item in FEATURES}
+_MEMORY_RATE_LIMITS = {}
+_MEMORY_RATE_LIMITS_LOCK = threading.Lock()
+_MEMORY_RATE_LIMIT_SECRET = secrets.token_bytes(32)
 
 
 def _response(start_response, status, payload, headers=()):
@@ -52,6 +61,77 @@ def _request_body(environ, maximum=MAX_BODY_BYTES):
             body[index] = 0
         raise ApiError(400, "La carga de la solicitud quedó incompleta.")
     return body
+
+
+def _enforce_rate_limit(environ, scope, limit, window_seconds=900):
+    remote = environ.get("REMOTE_ADDR", "")[:64] or "unknown"
+    if configured():
+        secret = (
+            os.environ.get("APP_RATE_LIMIT_SECRET")
+            or os.environ.get("JWT_SECRET")
+            or os.environ.get("DATABASE_URL")
+            or os.environ.get("POSTGRES_URL")
+            or os.environ.get("POSTGRES_PASSWORD")
+        )
+        if not secret:
+            raise ApiError(503, "No se pudo configurar el límite de solicitudes.")
+        key = hmac.new(
+            secret.encode("utf-8"),
+            f"{scope}|{remote}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO auth_rate_limits (key_hash, window_started_at, attempts)
+                VALUES (%s, now(), 1)
+                ON CONFLICT (key_hash) DO UPDATE SET
+                    attempts = CASE
+                        WHEN auth_rate_limits.window_started_at
+                             < now() - make_interval(secs => %s) THEN 1
+                        ELSE auth_rate_limits.attempts + 1
+                    END,
+                    window_started_at = CASE
+                        WHEN auth_rate_limits.window_started_at
+                             < now() - make_interval(secs => %s) THEN now()
+                        ELSE auth_rate_limits.window_started_at
+                    END,
+                    locked_until = CASE
+                        WHEN auth_rate_limits.window_started_at
+                             < now() - make_interval(secs => %s) THEN NULL
+                        WHEN auth_rate_limits.attempts + 1 > %s
+                             THEN now() + make_interval(secs => %s)
+                        ELSE auth_rate_limits.locked_until
+                    END
+                RETURNING attempts, COALESCE(locked_until > now(), false)
+                """,
+                (key, window_seconds, window_seconds, window_seconds, limit, window_seconds),
+            )
+            attempts, locked = cursor.fetchone()
+        if locked or attempts > limit:
+            raise ApiError(429, "Recibiste demasiadas solicitudes. Espera unos minutos e inténtalo de nuevo.")
+        return
+
+    now = time.monotonic()
+    key = hmac.new(
+        _MEMORY_RATE_LIMIT_SECRET,
+        f"{scope}|{remote}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    with _MEMORY_RATE_LIMITS_LOCK:
+        started, attempts = _MEMORY_RATE_LIMITS.get(key, (now, 0))
+        if now - started >= window_seconds:
+            started, attempts = now, 0
+        if attempts >= limit:
+            raise ApiError(429, "Recibiste demasiadas solicitudes. Espera unos minutos e inténtalo de nuevo.")
+        _MEMORY_RATE_LIMITS[key] = (started, attempts + 1)
+        if len(_MEMORY_RATE_LIMITS) > 10000:
+            expired = [
+                entry for entry, (window_started, _) in _MEMORY_RATE_LIMITS.items()
+                if now - window_started >= window_seconds
+            ]
+            for entry in expired:
+                _MEMORY_RATE_LIMITS.pop(entry, None)
 
 
 def _json_body(environ):
@@ -244,6 +324,7 @@ def _history(environ, user):
             SELECT id, bpm, musical_key, chord_timeline, similarity_matches, created_at
             FROM analysis_history
             WHERE user_id = %s
+              AND deleted_at IS NULL
             ORDER BY created_at DESC
             LIMIT %s
             """,
@@ -261,6 +342,32 @@ def _history(environ, user):
         }
         for row in rows
     ]
+
+
+def _update_history_visibility(record_id, user, restore):
+    with connect() as connection, connection.cursor() as cursor:
+        if restore:
+            cursor.execute(
+                """
+                UPDATE analysis_history
+                SET deleted_at = NULL
+                WHERE id = %s AND user_id = %s
+                  AND deleted_at > now() - interval '10 seconds'
+                RETURNING id
+                """,
+                (record_id, user["id"]),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE analysis_history
+                SET deleted_at = now()
+                WHERE id = %s AND user_id = %s AND deleted_at IS NULL
+                RETURNING id
+                """,
+                (record_id, user["id"]),
+            )
+        return cursor.fetchone() is not None
 
 
 def _route(path, method, environ, start_response):
@@ -284,12 +391,46 @@ def _route(path, method, environ, start_response):
         return 200, _analyze_request(environ, user), []
 
     if path in ("/api/history", "/api/history/"):
+        if method == "POST":
+            _check_origin(environ)
+            user = auth.require_user(environ)
+            if "library" not in _enabled_feature_ids():
+                raise ApiError(503, "La biblioteca está desactivada en este servidor.")
+            payload = _json_body(environ)
+            if not isinstance(payload, dict) or payload.get("action") not in ("delete", "restore"):
+                raise ApiError(400, "La acción del historial no es válida.")
+            try:
+                record_id = str(uuid.UUID(payload.get("id", "")))
+            except (ValueError, TypeError, AttributeError):
+                raise ApiError(400, "El identificador del análisis no es válido.")
+            restore = payload["action"] == "restore"
+            if not _update_history_visibility(record_id, user, restore=restore):
+                raise ApiError(404, "El análisis ya no está disponible para esta acción.")
+            return 200, {"ok": True}, []
         if method != "GET":
             raise ApiError(405, "Método no permitido.")
         user = auth.require_user(environ)
         if "library" not in _enabled_feature_ids():
             raise ApiError(503, "La biblioteca está desactivada en este servidor.")
         return 200, {"items": _history(environ, user)}, []
+
+    if path in ("/api/tips", "/api/tips/"):
+        if method == "GET":
+            user = auth.current_user(environ) if configured() else None
+            return 200, {"items": tips.list_tips(user)}, []
+        if method != "POST":
+            raise ApiError(405, "Método no permitido.")
+        _check_origin(environ)
+        user = auth.require_user(environ, admin=True)
+        payload = _json_body(environ)
+        if not isinstance(payload, dict) or payload.get("action") not in ("save", "delete"):
+            raise ApiError(400, "La acción de administración no es válida.")
+        if payload["action"] == "save":
+            return 200, {"item": tips.save_tip(payload.get("item"), user)}, []
+        tip_id = payload.get("id")
+        if not isinstance(tip_id, str) or not tips.delete_tip(tip_id):
+            raise ApiError(404, "El consejo ya no está disponible.")
+        return 200, {"ok": True}, []
 
     if path in ("/api/catalog", "/api/catalog/"):
         if method != "POST":
@@ -312,6 +453,16 @@ def application(environ, start_response):
     path = environ.get("PATH_INFO", "")
     method = environ.get("REQUEST_METHOD", "GET").upper()
     try:
+        if method == "POST" and path in ("/api/analyze", "/api/analyze/"):
+            _enforce_rate_limit(environ, "analyze", limit=20)
+        elif method == "POST" and path in ("/api/auth/login", "/api/auth/register"):
+            _enforce_rate_limit(environ, "auth", limit=30)
+        elif method == "POST" and path in ("/api/catalog", "/api/catalog/"):
+            _enforce_rate_limit(environ, "catalog", limit=30)
+        elif method == "POST" and path in ("/api/history", "/api/history/"):
+            _enforce_rate_limit(environ, "history", limit=30)
+        elif method == "POST" and path in ("/api/tips", "/api/tips/"):
+            _enforce_rate_limit(environ, "tips", limit=30)
         if path.startswith("/api/auth/") and method in ("POST", "DELETE"):
             _check_origin(environ)
         result = _route(path, method, environ, start_response)
@@ -322,10 +473,17 @@ def application(environ, start_response):
         start_response_status = status
     except ApiError as error:
         if error.status == 405:
-            allowed = "GET" if path in ("/api/features", "/api/history", "/api/auth/me") else "POST"
+            if path in ("/api/history", "/api/history/"):
+                allowed = "GET, POST"
+            elif path in ("/api/tips", "/api/tips/"):
+                allowed = "GET, POST"
+            else:
+                allowed = "GET" if path in ("/api/features", "/api/auth/me") else "POST"
             headers = [("Allow", allowed)]
         else:
             headers = []
+        if error.status == 429:
+            headers.append(("Retry-After", "900"))
         if path.startswith("/api/auth/") and error.status in (401, 503):
             headers.append(("Set-Cookie", auth.clear_cookie()))
         return _response(start_response, error.status, {"error": str(error)}, headers)

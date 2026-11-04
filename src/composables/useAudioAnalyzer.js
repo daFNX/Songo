@@ -1,4 +1,5 @@
 import { computed, onBeforeUnmount, ref } from 'vue'
+import { apiFetch } from '../services/api'
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024
 const MAX_ANALYSIS_BYTES = 4 * 1024 * 1024
@@ -25,6 +26,9 @@ export function useAudioAnalyzer() {
   const recordingState = ref('idle')
   const recordingSeconds = ref(0)
   const recordingError = ref('')
+  const previewPeaks = ref([])
+  const isPreviewLoading = ref(false)
+  const previewError = ref('')
   let requestController
   let mediaRecorder
   let mediaStream
@@ -32,6 +36,7 @@ export function useAudioAnalyzer() {
   let recordingStartedAt = 0
   let recordingFailed = false
   let isDisposed = false
+  let previewRequestId = 0
 
   const isRecording = computed(() => recordingState.value === 'recording')
   const fileSize = computed(() => {
@@ -69,6 +74,10 @@ export function useAudioAnalyzer() {
     }
     errorMessage.value = ''
     result.value = null
+    previewPeaks.value = []
+    previewError.value = ''
+    isPreviewLoading.value = false
+    const requestId = ++previewRequestId
     const validationError = validateFile(file)
     if (validationError) {
       selectedFile.value = null
@@ -76,6 +85,50 @@ export function useAudioAnalyzer() {
       return
     }
     selectedFile.value = file
+    void buildPreview(file, requestId)
+  }
+
+  async function buildPreview(file, requestId) {
+    const AudioContextConstructor = window.AudioContext || window.webkitAudioContext
+    if (!AudioContextConstructor) {
+      previewError.value = 'La vista previa no está disponible en este navegador; puedes analizar el audio igualmente.'
+      return
+    }
+
+    isPreviewLoading.value = true
+    const audioContext = new AudioContextConstructor()
+    try {
+      const decodedAudio = await audioContext.decodeAudioData(await file.arrayBuffer())
+      if (requestId !== previewRequestId || isDisposed) return
+      const peaks = []
+      const bucketCount = 56
+      const bucketSize = Math.max(1, Math.floor(decodedAudio.length / bucketCount))
+      const channels = Array.from(
+        { length: decodedAudio.numberOfChannels },
+        (_, index) => decodedAudio.getChannelData(index),
+      )
+      for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+        const start = bucket * bucketSize
+        const end = Math.min(decodedAudio.length, start + bucketSize)
+        let peak = 0
+        for (const channel of channels) {
+          for (let sample = start; sample < end; sample += 1) {
+            peak = Math.max(peak, Math.abs(channel[sample]))
+          }
+        }
+        peaks.push(peak)
+      }
+      const maximum = Math.max(...peaks, 0.001)
+      previewPeaks.value = peaks.map((peak) => Math.max(8, Math.round((peak / maximum) * 100)))
+      channels.forEach((channel) => channel.fill(0))
+    } catch {
+      if (requestId === previewRequestId) {
+        previewError.value = 'No pudimos preparar la vista previa; puedes analizar el audio igualmente.'
+      }
+    } finally {
+      await audioContext.close()
+      if (requestId === previewRequestId) isPreviewLoading.value = false
+    }
   }
 
   function onInputChange(event) {
@@ -186,7 +239,7 @@ export function useAudioAnalyzer() {
       analysisStage.value = 'preparing'
       const analysisAudio = await prepareAnalysisAudio(selectedFile.value)
       analysisStage.value = 'analyzing'
-      const response = await fetch('/api/analyze', {
+      const response = await apiFetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'audio/wav' },
         body: analysisAudio,
@@ -215,12 +268,31 @@ export function useAudioAnalyzer() {
   }
 
   function clearFile() {
+    previewRequestId += 1
     requestController?.abort()
     requestController = undefined
     selectedFile.value = null
     result.value = null
     errorMessage.value = ''
+    previewPeaks.value = []
+    previewError.value = ''
+    isPreviewLoading.value = false
     isAnalyzing.value = false
+  }
+
+  function showHistoryResult(item) {
+    requestController?.abort()
+    requestController = undefined
+    isAnalyzing.value = false
+    previewRequestId += 1
+    selectedFile.value = null
+    previewPeaks.value = []
+    result.value = {
+      ...item,
+      duration: '—',
+      source: 'history',
+    }
+    errorMessage.value = ''
   }
 
   function releaseMicrophone() {
@@ -344,6 +416,9 @@ export function useAudioAnalyzer() {
     recordingState,
     recordingSeconds,
     recordingError,
+    previewPeaks,
+    isPreviewLoading,
+    previewError,
     isRecording,
     fileSize,
     fileFormat,
@@ -352,6 +427,7 @@ export function useAudioAnalyzer() {
     onDrop,
     analyze,
     clearFile,
+    showHistoryResult,
     startRecording,
     stopRecording,
   }
