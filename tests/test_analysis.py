@@ -1,11 +1,14 @@
 import io
 import json
 import math
+import os
 import struct
 import unittest
 import wave
+from unittest.mock import patch
 
-from api.analyze import AnalysisError, analyze_wav, application
+from api.analyze import application
+from backend.services.tempo import AnalysisError, analyze_wav
 
 
 def make_wav(bpm=120, duration=8, sample_rate=8000):
@@ -40,7 +43,8 @@ def request_api(method, path, body=b"", content_type=""):
         response["status"] = int(status.split(" ", 1)[0])
         response["headers"] = dict(headers)
 
-    payload = b"".join(application(environ, start_response))
+    with patch.dict(os.environ, {"APP_ALLOWED_ORIGINS": "", "APP_BASE_URL": ""}):
+        payload = b"".join(application(environ, start_response))
     return response["status"], response["headers"], json.loads(payload)
 
 
@@ -100,6 +104,13 @@ class AnalyzeWavTests(unittest.TestCase):
         self.assertEqual(status, 415)
         self.assertIn("WAV", payload["error"])
 
+    def test_wsgi_respects_disabled_bpm_feature(self):
+        with patch.dict(os.environ, {"SONGO_ENABLED_FEATURES": "recording"}):
+            status, _, payload = request_api("POST", "/api/analyze", make_wav(), "audio/wav")
+
+        self.assertEqual(status, 503)
+        self.assertIn("desactivado", payload["error"])
+
     def test_wsgi_rejects_oversized_request_before_reading_body(self):
         environ = {
             "REQUEST_METHOD": "POST",
@@ -116,6 +127,28 @@ class AnalyzeWavTests(unittest.TestCase):
         payload = b"".join(application(environ, start_response))
         self.assertEqual(response["status"], 413)
         self.assertIn("4 MB", json.loads(payload)["error"])
+
+    def test_wsgi_rejects_cross_origin_analysis(self):
+        wav = make_wav()
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "PATH_INFO": "/api/analyze",
+            "CONTENT_LENGTH": str(len(wav)),
+            "CONTENT_TYPE": "audio/wav",
+            "HTTP_HOST": "songo.example",
+            "HTTP_ORIGIN": "https://attacker.example",
+            "wsgi.input": io.BytesIO(wav),
+        }
+        response = {}
+
+        def start_response(status, headers):
+            response["status"] = int(status.split(" ", 1)[0])
+
+        with patch.dict(os.environ, {"APP_ALLOWED_ORIGINS": "", "APP_BASE_URL": ""}):
+            with patch("backend.gateway.auth.current_user", return_value={"id": "test-user"}):
+                payload = b"".join(application(environ, start_response))
+        self.assertEqual(response["status"], 403)
+        self.assertEqual(json.loads(payload)["error"], "El origen de la solicitud no está permitido.")
 
 
 if __name__ == "__main__":

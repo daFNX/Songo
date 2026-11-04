@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .vercel/
+.vercel_python_packages/
 .env
 .env.*
 !.env.example

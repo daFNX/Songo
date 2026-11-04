@@ -1,77 +1,124 @@
 # Songo
 
-Songo es un espacio de análisis musical para músicos. Esta primera versión estima los BPM de tus grabaciones; la detección de acordes y la comparación de patrones están en desarrollo.
+**Songo: Tu música, sin dudas.** Es una herramienta para músicos que estima el tempo de una grabación y explora patrones armónicos. El proyecto combina una interfaz Vue 3, preprocesamiento de audio en el navegador y una API Python.
 
-- **Probar:** [songo-jet.vercel.app](https://songo-jet.vercel.app)
-- **Código:** [github.com/daFNX/Songo](https://github.com/daFNX/Songo)
+La aplicación es un prototipo funcional. BPM está abierto; acordes, tonalidad, sesiones e historial están implementados en una etapa inicial y requieren una base PostgreSQL y un secreto de sesión. La detección armónica y la comparación son aproximaciones experimentales: no identifican canciones con fiabilidad ni determinan legalmente si existe plagio. El catálogo solo debe contener material con autorización documentada.
 
-## Probarlo
+## Arquitectura
 
-No necesitas instalar nada: abre la aplicación, elige un audio y pulsa **Analizar tempo**. En móvil puedes seleccionarlo desde el dispositivo o grabar un fragmento con el micrófono. También puedes arrastrar un archivo desde un ordenador.
+- `src/`: interfaz Vue 3 y análisis/preprocesamiento en el navegador.
+- `api/`: puntos de entrada HTTP para las funciones Python de Vercel.
+- `backend/`: gateway WSGI, autenticación, persistencia, análisis armónico y catálogo.
+- `db/schema.sql`: DDL de PostgreSQL.
+- `tests/`: pruebas Python sin necesidad de credenciales de base de datos.
+- `vercel.json`: cabeceras de seguridad y límites de las funciones.
 
-Se aceptan WAV, MP3, M4A, AAC, OGG, FLAC y algunos contenedores de audio/video, siempre que el navegador pueda decodificarlos. El límite del archivo original es **50 MB** y la duración máxima, **3 minutos**.
+En el flujo de audio, el navegador decodifica el archivo original y lo convierte a WAV PCM mono de 11.025 Hz. El archivo convertido, de hasta 4 MB, se envía al endpoint de análisis; el servidor valida tipo, duración, canales y frecuencia, procesa las muestras en memoria y limpia los buffers mutables al terminar. No se guarda el archivo de audio.
 
-El original se decodifica en el navegador. Antes de enviarlo, Songo crea una versión mono WAV de 11.025 Hz: un minuto ocupa unos 1,3 MB, así que no hace falta recortar una canción WAV de 11 MB solo para probarla. La API recibe únicamente esa copia reducida; no almacena el archivo.
+Las cuentas usan contraseñas Argon2id y JWT firmados en cookies `HttpOnly`, con sesiones revocables persistidas en PostgreSQL. Las rutas privadas verifican la sesión y el usuario; el historial está aislado por propietario. Sin PostgreSQL y `JWT_SECRET` válidos, el login y las funciones dependientes permanecen desactivados, sin sesiones de demostración.
 
-La decodificación depende del navegador y del códec instalado. Si un formato no se puede abrir, prueba a exportarlo como MP3 o WAV.
+## Requisitos
 
-La grabación solicita permiso al micrófono, dura hasta tres minutos y se procesa como un archivo local; no empieza a enviarse hasta que pulsas **Analizar tempo**. El navegador debe permitir acceso al micrófono (HTTPS o `localhost`).
+- Node.js 20 o posterior y npm.
+- Python 3.12 (la versión configurada para CI y Vercel).
+- PostgreSQL 13 o posterior para registro, autenticación, historial y catálogo.
 
-Puedes alternar entre tema oscuro y claro desde la barra superior. El diseño se adapta a pantallas pequeñas y a controles táctiles.
+## Desarrollo local
 
-## Cuenta y funciones modulares
+1. Instala dependencias del cliente y del servidor:
 
-El BPM y la grabación están disponibles sin cuenta. Acordes, similitud y biblioteca aparecen como funciones futuras que requerirán una cuenta. El inicio de sesión de esta maqueta solo crea una sesión JSON en `sessionStorage` para esta pestaña: no verifica el correo, no usa contraseñas y no protege rutas ni datos. No introduzcas información sensible. Para producción hay que sustituirlo por autenticación de servidor y sesiones seguras antes de dar acceso a funciones privadas.
+   ```powershell
+   npm install
+   python -m pip install -r requirements.txt
+   ```
 
-El catálogo de capacidades se mantiene en `src/features.js` y se publica desde `GET /api/features`. Se puede cambiar el manifiesto en el backend con `SONGO_ENABLED_FEATURES=bpm,recording`; las rutas del balanceador pueden dirigir cada API a su servicio cuando ese módulo exista. Una bandera solo anuncia disponibilidad: no implementa por sí sola la lógica de acordes, similitud o biblioteca.
+2. Copia `.env.example` a `.env` y configura PostgreSQL. Genera un valor aleatorio para `JWT_SECRET` (mínimo 32 bytes). No reutilices secretos de producción.
 
-## Qué hace el análisis
+   ```powershell
+   Copy-Item .env.example .env
+   ```
 
-Python valida el WAV compacto y estima los BPM a partir de cambios en la energía de la señal y autocorrelación. Es una aproximación inicial: las mitades o dobles del pulso, el silencio, una entrada débil y ritmos complejos pueden hacer que el resultado difiera del tempo musical.
+3. Aplica el esquema a una base de datos de desarrollo:
 
-Esta versión aún no detecta acordes ni tonalidad y no compara canciones. Una futura búsqueda de similitud requerirá una colección de referencia con derechos adecuados; una coincidencia, por sí sola, no demuestra plagio. Las letras y la sincronización con YouTube tampoco están implementadas.
+   Desde PowerShell, define `DATABASE_URL` en la terminal con el mismo URI configurado en `.env` y ejecuta:
 
-## Seguridad y privacidad
+   ```powershell
+   $env:DATABASE_URL = "postgresql://usuario:contraseña@host:5432/songo"
+   psql "$env:DATABASE_URL" -f db\schema.sql
+   ```
 
-- El audio original se procesa en el navegador; solo se envía la versión mono reducida.
-- La API acepta WAV PCM, comprueba el contenido real y limita la petición a 4 MB.
-- En servidor se acotan canales, frecuencia de muestreo y duración; los errores se devuelven como JSON.
-- El backend no escribe el audio a disco, registra nombres de archivo ni usa servicios externos.
-- Las sesiones JSON de esta maqueta son estado de demostración del navegador y no constituyen un mecanismo de autenticación.
-- El despliegue incluye CSP, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` y `Permissions-Policy`.
+   El servidor carga `.env` en desarrollo si existe; las variables ya definidas en el entorno tienen prioridad.
 
-El análisis puede producir BPM incorrectos; no se debe interpretar como una identificación de canción ni como evidencia legal de plagio.
+4. Inicia el servidor Python y Vite en terminales separadas:
 
-## Para ejecutar o probar cambios localmente
+   ```powershell
+   python api\analyze.py
+   ```
 
-La ejecución local es opcional; la aplicación pública es la forma más sencilla de probar Songo. Para desarrollo se necesita Node.js 20+ y Python 3.10+:
+   ```powershell
+   npm run dev
+   ```
 
-```powershell
-npm install
-```
+   Abre la dirección local que muestra Vite. El proxy envía `/api` al servidor Python en `127.0.0.1:8000`. Para probar el análisis básico sin DB, deja `DATABASE_URL` y `JWT_SECRET` sin configurar; la API reportará las funciones de cuenta como no disponibles.
 
-En una terminal:
+5. Ejecuta las comprobaciones:
 
-```powershell
-python api\analyze.py
-```
+   ```powershell
+   python -m unittest discover -s tests -p "test*.py"
+   npm run build
+   ```
 
-En otra:
+## Variables de entorno
 
-```powershell
-npm run dev
-```
+`.env.example` documenta las variables soportadas:
 
-Vite reenvía `/api` a Python en `127.0.0.1:8000`. Para comprobar los cambios:
+| Variable | Propósito |
+| --- | --- |
+| `DATABASE_URL` | URI privado de PostgreSQL. |
+| `DATABASE_CONNECT_TIMEOUT` | Tiempo máximo de conexión a la DB. |
+| `JWT_SECRET` | Secreto aleatorio de firma, de al menos 32 bytes. |
+| `JWT_ISSUER` | Emisor validado en los tokens. |
+| `SESSION_TTL_SECONDS` | Duración de la sesión del servidor. |
+| `PASSWORD_HASH_*` | Parámetros de costo de Argon2id. |
+| `SONGO_ENABLED_FEATURES` | Capacidades anunciadas: BPM, grabación, acordes, similitud e historial. |
+| `SONGO_CATALOG_MAX_RESULTS` | Máximo de coincidencias mostradas. |
+| `APP_ENV`, `APP_BASE_URL`, `APP_ALLOWED_ORIGINS` | Cookies seguras y validación del origen para operaciones mutables. |
+| `PORT` | Puerto del servidor de desarrollo. |
 
-```powershell
-python -m unittest discover -s tests -p "test*.py"
-npm run build
-```
+No guardes `.env`, URLs de base con credenciales ni secretos en Git, capturas, logs o documentos públicos. En Vercel, configura los secretos mediante **Project Settings → Environment Variables**.
 
-## Próximos pasos
+## API
 
-1. Reemplazar la sesión de demostración por autenticación de servidor y una base de datos.
-2. Implementar acordes y tonalidad detrás del sistema de módulos.
-3. Investigar huellas musicales y similitud usando un catálogo autorizado.
-4. Explorar letras y fuentes de reproducción con sus permisos y atribuciones correspondientes.
+| Método y ruta | Acceso | Función |
+| --- | --- | --- |
+| `GET /api/features` | Público | Capacidades activas, disponibilidad y estado de configuración. |
+| `POST /api/analyze` | Público o sesión | Estimación de BPM; tonalidad/acordes para sesiones cuando esté habilitado. Recibe WAV mono. |
+| `POST /api/auth/register` | Público, con origen validado | Registro con hash Argon2id y cookie de sesión. |
+| `POST /api/auth/login` | Público, con origen validado | Inicia una sesión revocable. |
+| `GET /api/auth/me` | Público | Consulta la sesión actual. |
+| `POST /api/auth/logout` | Sesión opcional | Revoca la sesión y expira la cookie. |
+| `GET /api/history` | Sesión requerida | Historial privado del usuario autenticado. |
+| `POST /api/catalog` | Rol `admin` | Incorpora una referencia solo con datos de autorización y licencia. |
+| `GET /api/health` | Público | Comprobación básica del proceso. |
+
+La semejanza compara perfiles cromáticos sencillos contra el catálogo autorizado. Una coincidencia acústica no constituye una evaluación legal de plagio. No se incluye sincronización de letras, acordes en reproductores externos ni reproducción de YouTube.
+
+## Despliegue en Vercel
+
+1. Importa `daFNX/Songo` en Vercel o conecta el repositorio desde el panel del proyecto. El proyecto utiliza Vite y funciones Python en `api/`; `vercel.json` establece las cabeceras HTTP de seguridad.
+2. Configura las variables de producción necesarias. Para habilitar cuentas, registra primero una base PostgreSQL, aplica `db/schema.sql` y carga `DATABASE_URL` y un `JWT_SECRET` generado de forma segura en Vercel. Define `APP_BASE_URL` con el dominio canónico HTTPS y activa únicamente las capacidades que hayan sido configuradas.
+3. Conserva el build de frontend predeterminado (`npm run build`) y verifica el despliegue y las funciones desde los logs de Vercel.
+4. Para despliegues automáticos, comprueba en Vercel **Settings → Git** que `daFNX/Songo` esté conectado y que la rama de producción sea la deseada. Un push solo activa CI/CD si esa integración está configurada correctamente.
+
+No habilites registro público en un entorno con datos reales sin definir una estrategia de abuso, recuperación de cuenta, privacidad y operación de la base de datos. No hay migración automática: aplica y versiona los cambios de DDL con revisión.
+
+## Calidad y contribuciones
+
+La integración continua instala dependencias, compila el cliente y ejecuta las pruebas Python. Antes de abrir un cambio, corre los mismos comandos localmente y sigue las convenciones del archivo [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
+## Limitaciones conocidas
+
+- BPM, tonalidad y acordes son estimaciones, no transcripciones musicales certificadas.
+- La huella cromática global y la comparación coseno son experimentales y no equivalen a un fingerprint robusto de reconocimiento tipo Shazam.
+- No se ha medido la precisión con un corpus representativo. Evita presentar resultados como identificación, acusación de plagio o asesoramiento legal.
+- La aplicación no busca letras ni integra YouTube.

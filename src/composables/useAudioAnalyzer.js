@@ -49,7 +49,7 @@ export function useAudioAnalyzer() {
     if (!file) return 'No pudimos leer ese archivo. Inténtalo de nuevo.'
     const extension = file.name.split('.').pop()?.toLowerCase()
     if (!SUPPORTED_EXTENSIONS.has(extension)) {
-      return 'Prueba con WAV, MP3, M4A, AAC, OGG o FLAC. El formato debe ser compatible con tu navegador.'
+      return 'Prueba con WAV, MP3, M4A, AAC, OGG, FLAC, MP4 o WebM compatibles con tu navegador.'
     }
     if (file.size === 0) return 'El archivo está vacío. Elige una grabación con audio.'
     if (file.size > MAX_FILE_BYTES) {
@@ -117,52 +117,60 @@ export function useAudioAnalyzer() {
       throw new Error('El audio supera la duración máxima de 3 minutos.')
     }
 
-    const frameCount = Math.floor(decodedAudio.duration * OUTPUT_SAMPLE_RATE)
-    const wav = new ArrayBuffer(44 + frameCount * 2)
-    const header = new DataView(wav)
-    const writeTag = (offset, value) => {
-      for (let index = 0; index < value.length; index += 1) {
-        header.setUint8(offset + index, value.charCodeAt(index))
-      }
-    }
-
-    writeTag(0, 'RIFF')
-    header.setUint32(4, wav.byteLength - 8, true)
-    writeTag(8, 'WAVE')
-    writeTag(12, 'fmt ')
-    header.setUint32(16, 16, true)
-    header.setUint16(20, 1, true)
-    header.setUint16(22, 1, true)
-    header.setUint32(24, OUTPUT_SAMPLE_RATE, true)
-    header.setUint32(28, OUTPUT_SAMPLE_RATE * 2, true)
-    header.setUint16(32, 2, true)
-    header.setUint16(34, 16, true)
-    writeTag(36, 'data')
-    header.setUint32(40, frameCount * 2, true)
-
-    const channels = Array.from(
-      { length: decodedAudio.numberOfChannels },
-      (_, index) => decodedAudio.getChannelData(index),
-    )
-    const samplesPerOutputFrame = decodedAudio.sampleRate / OUTPUT_SAMPLE_RATE
-    for (let index = 0; index < frameCount; index += 1) {
-      const start = Math.floor(index * samplesPerOutputFrame)
-      const end = Math.min(decodedAudio.length, Math.max(start + 1, Math.floor((index + 1) * samplesPerOutputFrame)))
-      let sample = 0
-      for (const channel of channels) {
-        for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1) {
-          sample += channel[sourceIndex]
+    let channels = []
+    try {
+      const frameCount = Math.floor(decodedAudio.duration * OUTPUT_SAMPLE_RATE)
+      const wav = new ArrayBuffer(44 + frameCount * 2)
+      const header = new DataView(wav)
+      const writeTag = (offset, value) => {
+        for (let index = 0; index < value.length; index += 1) {
+          header.setUint8(offset + index, value.charCodeAt(index))
         }
       }
-      sample /= (end - start) * channels.length
-      const pcmSample = Math.max(-1, Math.min(1, sample))
-      header.setInt16(44 + index * 2, pcmSample < 0 ? pcmSample * 32768 : pcmSample * 32767, true)
-    }
 
-    if (wav.byteLength > MAX_ANALYSIS_BYTES) {
-      throw new Error('No pudimos reducir el audio a un tamaño compatible. Prueba con un fragmento más corto.')
+      writeTag(0, 'RIFF')
+      header.setUint32(4, wav.byteLength - 8, true)
+      writeTag(8, 'WAVE')
+      writeTag(12, 'fmt ')
+      header.setUint32(16, 16, true)
+      header.setUint16(20, 1, true)
+      header.setUint16(22, 1, true)
+      header.setUint32(24, OUTPUT_SAMPLE_RATE, true)
+      header.setUint32(28, OUTPUT_SAMPLE_RATE * 2, true)
+      header.setUint16(32, 2, true)
+      header.setUint16(34, 16, true)
+      writeTag(36, 'data')
+      header.setUint32(40, frameCount * 2, true)
+
+      channels = Array.from(
+        { length: decodedAudio.numberOfChannels },
+        (_, index) => decodedAudio.getChannelData(index),
+      )
+      const samplesPerOutputFrame = decodedAudio.sampleRate / OUTPUT_SAMPLE_RATE
+      for (let index = 0; index < frameCount; index += 1) {
+        const start = Math.floor(index * samplesPerOutputFrame)
+        const end = Math.min(decodedAudio.length, Math.max(start + 1, Math.floor((index + 1) * samplesPerOutputFrame)))
+        let sample = 0
+        for (const channel of channels) {
+          for (let sourceIndex = start; sourceIndex < end; sourceIndex += 1) {
+            sample += channel[sourceIndex]
+          }
+        }
+        sample /= (end - start) * channels.length
+        const pcmSample = Math.max(-1, Math.min(1, sample))
+        header.setInt16(44 + index * 2, pcmSample < 0 ? pcmSample * 32768 : pcmSample * 32767, true)
+      }
+
+      if (wav.byteLength > MAX_ANALYSIS_BYTES) {
+        throw new Error('No pudimos reducir el audio a un tamaño compatible. Prueba con un fragmento más corto.')
+      }
+      const analysisFile = new Blob([wav], { type: 'audio/wav' })
+      new Uint8Array(wav).fill(0)
+      return analysisFile
+    } finally {
+      channels.forEach((channel) => channel.fill(0))
+      decodedAudio = null
     }
-    return new Blob([wav], { type: 'audio/wav' })
   }
 
   async function analyze() {
@@ -182,6 +190,7 @@ export function useAudioAnalyzer() {
         method: 'POST',
         headers: { 'Content-Type': 'audio/wav' },
         body: analysisAudio,
+        credentials: 'same-origin',
         signal: controller.signal,
       })
       const data = await response.json()
@@ -259,9 +268,13 @@ export function useAudioAnalyzer() {
         releaseMicrophone()
         mediaRecorder = undefined
         recordingState.value = 'idle'
-        if (recordingFailed) return
+        if (recordingFailed) {
+          chunks.length = 0
+          return
+        }
 
         const blob = new Blob(chunks, { type: mediaRecorderType })
+        chunks.length = 0
         if (!blob.size) {
           recordingError.value = 'No se capturó audio. Comprueba el micrófono e inténtalo de nuevo.'
           return

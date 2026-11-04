@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import { useAudioAnalyzer } from './composables/useAudioAnalyzer'
-import { useDemoSession } from './composables/useDemoSession'
+import { useAuthSession } from './composables/useAuthSession'
 import { FEATURES, mergeFeatureConfig } from './features'
 
 const {
@@ -25,19 +25,33 @@ const {
   startRecording,
   stopRecording,
 } = useAudioAnalyzer()
-const { session, sessionError, signIn, signOut } = useDemoSession()
+const { session, sessionError, isSessionLoading, signIn, signOut } = useAuthSession()
 const featureItems = ref(FEATURES)
 const featureConfigMessage = ref('')
+const authConfigured = ref(false)
 const isLightMode = ref(false)
 const isAuthOpen = ref(false)
 const authEmail = ref('')
+const authPassword = ref('')
+const authMode = ref('login')
 const authDialog = ref(null)
+const historyItems = ref([])
+const historyError = ref('')
+const isHistoryOpen = ref(false)
+const bpmEnabled = computed(() => featureItems.value.some((feature) => feature.id === 'bpm' && feature.enabled && feature.available))
+const recordingEnabled = computed(() => featureItems.value.some((feature) => feature.id === 'recording' && feature.enabled && feature.available))
 const futureFeatures = computed(() => featureItems.value.filter((feature) => !['bpm', 'recording'].includes(feature.id)))
 const recordingTime = computed(() => {
   const minutes = Math.floor(recordingSeconds.value / 60)
   const seconds = String(recordingSeconds.value % 60).padStart(2, '0')
   return `${minutes}:${seconds}`
 })
+
+function formatChordTime(seconds) {
+  const minutes = Math.floor(seconds / 60)
+  const remainder = Math.floor(seconds % 60)
+  return `${minutes}:${String(remainder).padStart(2, '0')}`
+}
 
 watch(isLightMode, (enabled) => {
   document.documentElement.dataset.theme = enabled ? 'light' : 'dark'
@@ -55,26 +69,42 @@ async function loadFeatureConfig() {
     if (!response.ok) throw new Error('No se pudo consultar el catálogo de funciones.')
     const data = await response.json()
     featureItems.value = mergeFeatureConfig(data.features)
+    authConfigured.value = data.auth_configured === true
   } catch {
-    featureConfigMessage.value = 'No pudimos actualizar el catálogo; mostramos las funciones de esta maqueta.'
+    featureConfigMessage.value = 'No pudimos consultar las funciones del servidor. Inténtalo de nuevo más tarde.'
   }
 }
 
 function openSignIn() {
   sessionError.value = ''
+  authMode.value = 'login'
   isAuthOpen.value = true
 }
 
-function submitSignIn() {
-  if (signIn(authEmail.value)) {
+async function submitSignIn() {
+  if (await signIn(authEmail.value, authPassword.value, authMode.value === 'register')) {
     isAuthOpen.value = false
     authEmail.value = ''
+    authPassword.value = ''
   }
 }
 
 function handleFeatureAction(feature) {
   if (!session.value && feature.requiresAuth) {
     openSignIn()
+  }
+}
+
+async function loadHistory() {
+  historyError.value = ''
+  try {
+    const response = await fetch('/api/history?limit=20', { credentials: 'same-origin' })
+    const payload = await response.json()
+    if (!response.ok) throw new Error(payload.error || 'No pudimos consultar tu historial.')
+    historyItems.value = payload.items
+    isHistoryOpen.value = true
+  } catch (error) {
+    historyError.value = error.message || 'No pudimos consultar tu historial.'
   }
 }
 
@@ -99,9 +129,11 @@ loadFeatureConfig()
           <span aria-hidden="true">{{ isLightMode ? '☾' : '☼' }}</span>
           <span>{{ isLightMode ? 'Modo oscuro' : 'Modo claro' }}</span>
         </button>
-        <span v-if="session" class="session-name">{{ session.name }}</span>
+        <span v-if="session" class="session-name">{{ session.email }}</span>
         <button v-if="session" class="utility-button account-button" type="button" @click="signOut">Salir</button>
-        <button v-else class="utility-button account-button" type="button" @click="openSignIn">Entrar</button>
+        <button v-else class="utility-button account-button" type="button" :disabled="isSessionLoading" @click="openSignIn">
+          {{ isSessionLoading ? 'Verificando…' : 'Entrar' }}
+        </button>
       </nav>
     </header>
 
@@ -120,6 +152,9 @@ loadFeatureConfig()
           </div>
           <span class="private-label"><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="3.5" y="7" width="9" height="7" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg> Audio privado</span>
         </div>
+        <p v-if="!bpmEnabled" class="feature-config-message" role="status">
+          El análisis de BPM está desactivado en este servidor.
+        </p>
 
         <div class="analysis-grid">
           <div class="upload-column">
@@ -137,7 +172,7 @@ loadFeatureConfig()
                 type="file"
                 accept=".wav,.mp3,.m4a,.aac,.ogg,.flac,.mp4,.webm,audio/*"
                 aria-label="Selecciona un archivo de audio"
-                :disabled="recordingState !== 'idle' || isAnalyzing"
+                :disabled="!bpmEnabled || recordingState !== 'idle' || isAnalyzing"
                 @change="onInputChange"
               />
               <template v-if="selectedFile">
@@ -155,12 +190,12 @@ loadFeatureConfig()
                   <svg viewBox="0 0 24 24" fill="none"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14.5v3A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 </div>
                 <p class="drop-title">Suelta tu audio aquí</p>
-                <p class="drop-subtitle">o <button class="browse-button" type="button" :disabled="recordingState !== 'idle' || isAnalyzing" @click="fileInput?.click()">explora tus archivos</button></p>
-                <span class="file-requirements">WAV · MP3 · M4A · OGG · HASTA 50 MB</span>
+                <p class="drop-subtitle">o                 <button class="browse-button" type="button" :disabled="!bpmEnabled || recordingState !== 'idle' || isAnalyzing" @click="fileInput?.click()">explora tus archivos</button></p>
+                <span class="file-requirements">WAV · MP3 · M4A · AAC · OGG · FLAC · HASTA 50 MB</span>
               </template>
             </div>
 
-            <div class="recording-control">
+            <div v-if="recordingEnabled" class="recording-control">
               <button
                 v-if="recordingState === 'idle'"
                 class="record-button"
@@ -187,6 +222,7 @@ loadFeatureConfig()
               </span>
               <p class="recording-caption">Máximo 3 minutos · el audio no se guarda en el servidor</p>
             </div>
+            <p v-else class="recording-caption">La grabación está desactivada en este servidor.</p>
 
             <p v-if="recordingError" class="feedback error-message" role="alert">
               <span class="feedback-icon" aria-hidden="true">!</span>{{ recordingError }}
@@ -199,7 +235,7 @@ loadFeatureConfig()
             <button
               class="analyze-button"
               type="button"
-              :disabled="!selectedFile || isAnalyzing || recordingState !== 'idle'"
+              :disabled="!bpmEnabled || !selectedFile || isAnalyzing || recordingState !== 'idle'"
               @click="analyze"
             >
               <span v-if="isAnalyzing" class="spinner" aria-hidden="true"></span>
@@ -234,6 +270,30 @@ loadFeatureConfig()
               <span class="result-footnote-mark">✳</span>
               <span>Un primer paso para entender tu sonido.</span>
             </div>
+            <div v-if="result?.key" class="harmony-result" aria-live="polite">
+              <p class="harmony-key"><span>Tonalidad estimada</span><strong>{{ result.key }}</strong></p>
+              <div v-if="result.chords?.length" class="chord-timeline" aria-label="Secuencia aproximada de acordes">
+                <span v-for="(item, index) in result.chords" :key="`${item.start_seconds}-${index}`" class="chord-item">
+                  <strong>{{ item.chord }}</strong>
+                  <small>{{ formatChordTime(item.start_seconds) }}</small>
+                </span>
+              </div>
+              <p class="harmony-disclaimer">Acordes y tonalidad son estimaciones automáticas, no una transcripción musical verificada.</p>
+            </div>
+            <div v-if="result?.similarity_disclaimer" class="similarity-result" aria-live="polite">
+              <strong>Comparación con el catálogo autorizado</strong>
+              <p v-if="result.similarity_matches?.length">
+                <span v-for="match in result.similarity_matches" :key="match.id" class="similarity-match">
+                  {{ match.artist }} — {{ match.title }} ({{ match.similarity_percent }}%)
+                </span>
+              </p>
+              <p v-else>No encontramos coincidencias por encima del umbral en el catálogo autorizado.</p>
+              <small>{{ result.similarity_disclaimer }}</small>
+            </div>
+            <p v-if="result?.locked_features?.length" class="result-locked-note">
+              Inicia sesión para consultar acordes, tonalidad y análisis guardados.
+              <button class="browse-button" type="button" @click="openSignIn">Entrar</button>
+            </p>
           </div>
         </div>
       </section>
@@ -270,7 +330,7 @@ loadFeatureConfig()
           </div>
           <span class="feature-session-status">
             <span class="status-dot"></span>
-            {{ session ? 'Sesión de demostración' : 'Exploración sin cuenta' }}
+            {{ session ? 'Sesión segura activa' : 'Cuenta opcional' }}
           </span>
         </div>
         <p v-if="featureConfigMessage" class="feature-config-message" role="status">{{ featureConfigMessage }}</p>
@@ -280,9 +340,9 @@ loadFeatureConfig()
               <span class="feature-symbol" aria-hidden="true">{{ feature.id === 'chords' ? '⌁' : feature.id === 'similarity' ? '◎' : '▤' }}</span>
               <span
                 class="feature-state"
-                :class="{ 'is-enabled': feature.enabled && feature.clientAvailable, 'is-configured': feature.enabled && !feature.clientAvailable }"
+                :class="{ 'is-enabled': feature.enabled && feature.available, 'is-configured': feature.enabled && !feature.available }"
               >
-                {{ feature.enabled ? (feature.clientAvailable ? 'DISPONIBLE' : 'MÓDULO CONFIGURADO') : 'EN PREPARACIÓN' }}
+                {{ feature.enabled ? (feature.available ? 'DISPONIBLE' : 'MÓDULO CONFIGURADO') : (feature.available ? 'DESACTIVADO' : 'NO CONFIGURADO') }}
               </span>
             </div>
             <h3>{{ feature.name }}</h3>
@@ -296,14 +356,34 @@ loadFeatureConfig()
               Iniciar sesión <span aria-hidden="true">↗</span>
             </button>
             <span v-else-if="feature.requiresAuth" class="feature-locked">
-              {{ feature.enabled ? 'Configurado en el servidor · falta integrar el módulo' : 'Requiere cuenta · próximo lanzamiento' }}
+              {{ feature.enabled ? 'Disponible con cuenta' : feature.available ? 'Requiere configuración y cuenta' : 'Requiere base de datos y cuenta' }}
             </span>
             <span v-else class="feature-locked">Próximamente</span>
+            <button
+              v-if="feature.id === 'library' && session && feature.enabled"
+              class="feature-action"
+              type="button"
+              @click="loadHistory"
+            >
+              Ver mi historial <span aria-hidden="true">↗</span>
+            </button>
+          </article>
+        </div>
+        <p v-if="historyError" class="auth-error" role="alert">{{ historyError }}</p>
+        <div v-if="isHistoryOpen" class="history-list" aria-live="polite">
+          <div class="history-heading">
+            <h3>Mis análisis recientes</h3>
+            <button class="browse-button" type="button" @click="isHistoryOpen = false">Cerrar</button>
+          </div>
+          <p v-if="!historyItems.length" class="history-empty">Todavía no hay análisis guardados.</p>
+          <article v-for="item in historyItems" :key="item.id" class="history-item">
+            <strong>{{ item.bpm }} BPM<span v-if="item.key"> · {{ item.key }}</span></strong>
+            <span>{{ new Date(item.created_at).toLocaleString() }}</span>
           </article>
         </div>
         <p class="session-disclaimer">
-          El inicio de sesión actual es una demostración local: no valida identidad ni protege datos.
-          No introduzcas contraseñas ni información sensible.
+          El análisis de BPM es libre. Acordes, similitud e historial requieren cuenta. Las comparaciones acústicas
+          no constituyen una evaluación legal de plagio.
         </p>
       </section>
     </main>
@@ -322,9 +402,19 @@ loadFeatureConfig()
       @close="isAuthOpen = false"
     >
       <button class="dialog-close" type="button" aria-label="Cerrar ventana" @click="isAuthOpen = false">×</button>
-      <p class="section-index">CUENTA DE DEMOSTRACIÓN</p>
-      <h2 id="auth-title">Tu espacio, a tu ritmo.</h2>
-      <p class="dialog-copy">Ingresa un correo para previsualizar las funciones que requerirán una cuenta.</p>
+      <p class="section-index">CUENTA SEGURA</p>
+      <h2 id="auth-title">{{ authMode === 'register' ? 'Crea tu cuenta.' : 'Bienvenido de vuelta.' }}</h2>
+      <p class="dialog-copy">Tu cuenta protege el historial y habilita las herramientas de análisis musical.</p>
+      <p v-if="!authConfigured" class="auth-error" role="status">
+        Las cuentas todavía no están configuradas en este servidor. El análisis básico sigue disponible.
+      </p>
+      <p v-if="!authConfigured" class="auth-error" role="status">
+        El servidor no tiene autenticación activa. Configura PostgreSQL y JWT_SECRET para habilitar cuentas.
+      </p>
+      <div class="auth-mode-tabs" role="group" aria-label="Tipo de acceso">
+        <button type="button" :aria-pressed="authMode === 'login'" @click="authMode = 'login'">Iniciar sesión</button>
+        <button type="button" :aria-pressed="authMode === 'register'" @click="authMode = 'register'">Crear cuenta</button>
+      </div>
       <form class="auth-form" @submit.prevent="submitSignIn">
         <label for="auth-email">Correo electrónico</label>
         <input
@@ -338,10 +428,25 @@ loadFeatureConfig()
           autofocus
           placeholder="tu@correo.com"
         />
+        <label for="auth-password">Contraseña</label>
+        <input
+          id="auth-password"
+          v-model="authPassword"
+          type="password"
+          name="password"
+          :autocomplete="authMode === 'register' ? 'new-password' : 'current-password'"
+          minlength="12"
+          maxlength="128"
+          required
+          placeholder="Mínimo 12 caracteres"
+        />
         <p v-if="sessionError" class="auth-error" role="alert">{{ sessionError }}</p>
-        <button class="analyze-button" type="submit">Continuar en modo demo <span class="button-arrow" aria-hidden="true">↗</span></button>
+        <button class="analyze-button" type="submit" :disabled="!authConfigured">
+          {{ authMode === 'register' ? 'Crear cuenta segura' : 'Iniciar sesión' }}
+          <span class="button-arrow" aria-hidden="true">↗</span>
+        </button>
       </form>
-      <p class="dialog-disclaimer">No se envía el correo a ningún servidor. La sesión se conserva solo en esta pestaña.</p>
+      <p class="dialog-disclaimer">En producción, la contraseña se envía por HTTPS y se almacena con Argon2id. La sesión usa una cookie HttpOnly.</p>
     </dialog>
   </div>
 </template>

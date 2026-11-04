@@ -35,7 +35,8 @@ class FeatureConfigTests(unittest.TestCase):
 
     def test_environment_can_toggle_known_feature_flags(self):
         with patch.dict(os.environ, {"SONGO_ENABLED_FEATURES": "bpm,chords"}):
-            features = enabled_features()
+            with patch.dict(os.environ, {"DATABASE_URL": "postgresql://test", "JWT_SECRET": "x" * 48}):
+                features = enabled_features()
 
         self.assertEqual(
             {feature["id"] for feature in features if feature["enabled"]},
@@ -44,7 +45,8 @@ class FeatureConfigTests(unittest.TestCase):
 
     def test_unknown_feature_flag_is_rejected(self):
         with patch.dict(os.environ, {"SONGO_ENABLED_FEATURES": "bpm,unknown"}):
-            with self.assertRaises(ValueError):
+            from backend.services.errors import ApiError
+            with self.assertRaises(ApiError):
                 enabled_features()
 
     def test_wsgi_returns_feature_manifest_without_caching(self):
@@ -55,6 +57,13 @@ class FeatureConfigTests(unittest.TestCase):
         self.assertEqual(response["body"]["version"], 1)
         self.assertEqual(response["headers"]["Cache-Control"], "no-store")
         self.assertEqual(len(response["body"]["features"]), 5)
+
+    def test_auth_session_is_explicitly_unconfigured_without_database(self):
+        with patch.dict(os.environ, {}, clear=True):
+            response = request_api(path="/api/auth/me")
+
+        self.assertEqual(response["status"], 200)
+        self.assertEqual(response["body"], {"user": None, "auth_configured": False})
 
     def test_wsgi_rejects_non_get_requests(self):
         response = request_api(method="POST")
@@ -73,7 +82,7 @@ class FeatureConfigTests(unittest.TestCase):
             response = request_api()
 
         self.assertEqual(response["status"], 500)
-        self.assertEqual(response["body"], {"error": "La configuración de funciones no es válida."})
+        self.assertIn("identificadores desconocidos", response["body"]["error"])
 
 
 if __name__ == "__main__":

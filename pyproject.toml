@@ -1,0 +1,9 @@
+[project]
+name = "songo"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+    "argon2-cffi>=23.1,<26",
+    "psycopg[binary]>=3.2,<4",
+    "python-dotenv>=1.0,<2",
+]

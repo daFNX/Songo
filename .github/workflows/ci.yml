@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obtener el código
+        uses: actions/checkout@v4
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Instalar dependencias Python
+        run: python -m pip install -r requirements.txt
+      - name: Instalar dependencias web
+        run: npm ci
+      - name: Validar módulos Python
+        run: python -m compileall -q api backend tests
+      - name: Ejecutar pruebas Python
+        run: python -m unittest discover -s tests -p "test*.py"
+      - name: Compilar frontend
+        run: npm run build

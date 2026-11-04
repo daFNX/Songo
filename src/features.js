@@ -4,40 +4,40 @@ export const FEATURES = [
     name: 'Tempo y BPM',
     description: 'Estima los pulsos por minuto de una grabación.',
     requiresAuth: false,
-    clientAvailable: true,
     enabled: true,
+    available: true,
   },
   {
     id: 'recording',
     name: 'Grabación desde el micrófono',
     description: 'Graba hasta tres minutos y analiza el resultado en la misma sesión.',
     requiresAuth: false,
-    clientAvailable: true,
     enabled: true,
+    available: true,
   },
   {
     id: 'chords',
     name: 'Acordes y tonalidad',
-    description: 'Identifica progresiones armónicas en tus composiciones.',
+    description: 'Estima progresiones armónicas y tonalidad en tus composiciones.',
     requiresAuth: true,
-    clientAvailable: false,
     enabled: false,
+    available: true,
   },
   {
     id: 'similarity',
     name: 'Similitud musical',
     description: 'Compara patrones con un catálogo de referencias autorizado.',
     requiresAuth: true,
-    clientAvailable: false,
     enabled: false,
+    available: false,
   },
   {
     id: 'library',
     name: 'Tu biblioteca',
     description: 'Guarda análisis y retómalos desde tu cuenta.',
     requiresAuth: true,
-    clientAvailable: false,
     enabled: false,
+    available: false,
   },
 ]
 
@@ -52,6 +52,7 @@ export function mergeFeatureConfig(config) {
       !item
       || typeof item.id !== 'string'
       || typeof item.enabled !== 'boolean'
+      || typeof item.available !== 'boolean'
       || !FEATURES.some((feature) => feature.id === item.id)
     ) {
       throw new Error('La configuración contiene una función desconocida o incompleta.')
@@ -62,5 +63,6 @@ export function mergeFeatureConfig(config) {
   return FEATURES.map((feature) => ({
     ...feature,
     enabled: enabledById.has(feature.id) ? enabledById.get(feature.id) : feature.enabled,
+    available: config.find((item) => item.id === feature.id)?.available ?? feature.available,
   }))
 }
