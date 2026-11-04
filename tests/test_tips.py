@@ -3,6 +3,8 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
+from psycopg.errors import UndefinedTable
+
 from backend.gateway import application
 from backend.services.errors import ApiError
 from backend.services.tips import _validate_tip, delete_tip, list_tips
@@ -36,6 +38,24 @@ class TipsApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertGreaterEqual(len(payload["items"]), 3)
         self.assertIn("exercise", payload["items"][0])
+
+    def test_public_tips_fall_back_while_schema_migration_is_pending(self):
+        with patch("backend.services.tips.configured", return_value=True):
+            with patch("backend.services.tips.connect", side_effect=UndefinedTable("table missing")):
+                status, _, payload = request_api("GET", "/api/tips")
+
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(len(payload["items"]), 3)
+
+    def test_admin_get_reports_pending_schema_migration(self):
+        with patch("backend.gateway.configured", return_value=True):
+            with patch("backend.gateway.auth.current_user", return_value={"id": "admin-id", "role": "admin"}):
+                with patch("backend.services.tips.configured", return_value=True):
+                    with patch("backend.services.tips.connect", side_effect=UndefinedTable("table missing")):
+                        status, _, payload = request_api("GET", "/api/tips")
+
+        self.assertEqual(status, 503)
+        self.assertIn("db/schema.sql", payload["error"])
 
     def test_admin_can_save_tip(self):
         tip = {

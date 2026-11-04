@@ -1,7 +1,12 @@
+import logging
 import uuid
+
+from psycopg.errors import UndefinedTable
 
 from .database import configured, connect
 from .errors import ApiError
+
+LOGGER = logging.getLogger(__name__)
 
 STARTER_TIPS = (
     {
@@ -87,19 +92,25 @@ def _ensure_starter_tips(cursor, admin_id):
 def list_tips(user=None):
     if not configured():
         return list(STARTER_TIPS)
-    with connect() as connection, connection.cursor() as cursor:
+    try:
+        with connect() as connection, connection.cursor() as cursor:
+            if user and user["role"] == "admin":
+                _ensure_starter_tips(cursor, user["id"])
+            cursor.execute(
+                """
+                SELECT id, title, category, content, exercise, published, updated_at
+                FROM musical_tips
+                WHERE deleted_at IS NULL AND (published IS TRUE OR %s)
+                ORDER BY category, title
+                """,
+                (bool(user and user["role"] == "admin"),),
+            )
+            rows = cursor.fetchall()
+    except UndefinedTable:
+        LOGGER.warning("La tabla musical_tips aún no existe; se requiere aplicar db/schema.sql.")
         if user and user["role"] == "admin":
-            _ensure_starter_tips(cursor, user["id"])
-        cursor.execute(
-            """
-            SELECT id, title, category, content, exercise, published, updated_at
-            FROM musical_tips
-            WHERE deleted_at IS NULL AND (published IS TRUE OR %s)
-            ORDER BY category, title
-            """,
-            (bool(user and user["role"] == "admin"),),
-        )
-        rows = cursor.fetchall()
+            raise ApiError(503, "La guía administrable requiere aplicar la migración db/schema.sql.")
+        return list(STARTER_TIPS)
     if not rows:
         with connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT EXISTS (SELECT 1 FROM musical_tips)")
@@ -132,34 +143,37 @@ def save_tip(payload, user):
             raise ApiError(400, "El identificador del consejo no es válido.")
     else:
         tip_id = str(uuid.uuid4())
-    with connect() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            """
-            INSERT INTO musical_tips (id, title, category, content, exercise, published, created_by)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                title = EXCLUDED.title,
-                category = EXCLUDED.category,
-                content = EXCLUDED.content,
-                exercise = EXCLUDED.exercise,
-                published = EXCLUDED.published,
-                updated_at = now(),
-                deleted_at = NULL
-            RETURNING id, title, category, content, exercise, published, updated_at
-            """,
-            (
-                tip_id,
-                values["title"],
-                values["category"],
-                values["content"],
-                values["exercise"],
-                values["published"],
-                user["id"],
-            ),
-        )
-        row = cursor.fetchone()
-        if row is None:
-            raise ApiError(404, "El consejo no está disponible para editar.")
+    try:
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO musical_tips (id, title, category, content, exercise, published, created_by)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    category = EXCLUDED.category,
+                    content = EXCLUDED.content,
+                    exercise = EXCLUDED.exercise,
+                    published = EXCLUDED.published,
+                    updated_at = now(),
+                    deleted_at = NULL
+                RETURNING id, title, category, content, exercise, published, updated_at
+                """,
+                (
+                    tip_id,
+                    values["title"],
+                    values["category"],
+                    values["content"],
+                    values["exercise"],
+                    values["published"],
+                    user["id"],
+                ),
+            )
+            row = cursor.fetchone()
+    except UndefinedTable:
+        raise ApiError(503, "La guía administrable requiere aplicar la migración db/schema.sql.")
+    if row is None:
+        raise ApiError(404, "El consejo no está disponible para editar.")
     return {
         "id": str(row[0]),
         "title": row[1],
@@ -176,14 +190,17 @@ def delete_tip(tip_id):
         normalized_id = str(uuid.UUID(tip_id))
     except (ValueError, TypeError, AttributeError):
         raise ApiError(400, "El identificador del consejo no es válido.")
-    with connect() as connection, connection.cursor() as cursor:
-        cursor.execute(
-            """
-            UPDATE musical_tips
-            SET deleted_at = now(), updated_at = now()
-            WHERE id = %s AND deleted_at IS NULL
-            RETURNING id
-            """,
-            (normalized_id,),
-        )
-        return cursor.fetchone() is not None
+    try:
+        with connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE musical_tips
+                SET deleted_at = now(), updated_at = now()
+                WHERE id = %s AND deleted_at IS NULL
+                RETURNING id
+                """,
+                (normalized_id,),
+            )
+            return cursor.fetchone() is not None
+    except UndefinedTable:
+        raise ApiError(503, "La guía administrable requiere aplicar la migración db/schema.sql.")
