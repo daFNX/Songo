@@ -74,7 +74,8 @@ Las cuentas usan contraseñas Argon2id y JWT firmados en cookies `HttpOnly`, con
 
 | Variable | Propósito |
 | --- | --- |
-| `DATABASE_URL` | URI privado de PostgreSQL. |
+| `DATABASE_URL` | URI privado de PostgreSQL; tiene prioridad sobre `POSTGRES_URL`. |
+| `POSTGRES_URL` | Alias compatible con variables automáticas de Vercel Postgres. |
 | `DATABASE_CONNECT_TIMEOUT` | Tiempo máximo de conexión a la DB. |
 | `JWT_SECRET` | Secreto aleatorio de firma, de al menos 32 bytes. |
 | `JWT_ISSUER` | Emisor validado en los tokens. |
@@ -111,6 +112,21 @@ La semejanza compara perfiles cromáticos sencillos contra el catálogo autoriza
 4. Para despliegues automáticos, comprueba en Vercel **Settings → Git** que `daFNX/Songo` esté conectado y que la rama de producción sea la deseada. Un push solo activa CI/CD si esa integración está configurada correctamente.
 
 No habilites registro público en un entorno con datos reales sin definir una estrategia de abuso, recuperación de cuenta, privacidad y operación de la base de datos. No hay migración automática: aplica y versiona los cambios de DDL con revisión.
+
+### Primer usuario administrador
+
+El registro público siempre crea usuarios con rol `user`; no existe contraseña, token de elevación ni endpoint de bootstrap en producción. Para crear el primer administrador:
+
+1. Registra la cuenta desde la aplicación y confirma que esa cuenta puede iniciar sesión.
+2. Desde un equipo de confianza, configura `DATABASE_URL` (o `POSTGRES_URL`) con credenciales privilegiadas de la base de datos y ejecuta:
+
+   ```powershell
+   python scripts\bootstrap_admin.py correo@ejemplo.com
+   ```
+
+3. Revisa el correo que muestra el script y escribe literalmente `PROMOTE correo@ejemplo.com` para confirmar. El script usa una transacción y un bloqueo de PostgreSQL; falla si la cuenta no existe o si ya hay cualquier administrador.
+
+El script no se despliega como endpoint y no crea cuentas ni contraseñas. Una vez que el primer administrador exista, no puede volver a usarse para promover otra cuenta. Guarda el acceso a la base como secreto; nunca incluyas su URI en argumentos, logs o commits.
 
 ## Calidad y contribuciones
 

@@ -43,6 +43,23 @@ class FeatureConfigTests(unittest.TestCase):
             {"bpm", "chords"},
         )
 
+    def test_vercel_postgres_url_enables_configured_database_features(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SONGO_ENABLED_FEATURES": "bpm,chords",
+                "POSTGRES_URL": "postgresql://test",
+                "JWT_SECRET": "x" * 48,
+            },
+            clear=True,
+        ):
+            features = enabled_features()
+
+        self.assertIn(
+            "chords",
+            {feature["id"] for feature in features if feature["enabled"]},
+        )
+
     def test_unknown_feature_flag_is_rejected(self):
         with patch.dict(os.environ, {"SONGO_ENABLED_FEATURES": "bpm,unknown"}):
             from backend.services.errors import ApiError
