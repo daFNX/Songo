@@ -11,7 +11,7 @@ import wave
 from http import HTTPStatus
 from urllib.parse import parse_qs
 
-from .services import auth, catalog, tips
+from .services import admin_metrics, auth, catalog, tips
 from .services.audio import analyze_music
 from .services.database import configured, connect
 from .services.errors import ApiError
@@ -414,6 +414,17 @@ def _route(path, method, environ, start_response):
             raise ApiError(503, "La biblioteca está desactivada en este servidor.")
         return 200, {"items": _history(environ, user)}, []
 
+    if path in ("/api/admin/metrics", "/api/admin/metrics/"):
+        if method != "GET":
+            raise ApiError(405, "Método no permitido.")
+        auth.require_user(environ, admin=True)
+        features = _configured_features()["features"]
+        bpm_feature = next(feature for feature in features if feature["id"] == "bpm")
+        return 200, admin_metrics.get_admin_metrics(
+            analyzer_enabled=bpm_feature["enabled"],
+            analyzer_available=bpm_feature["available"],
+        ), []
+
     if path in ("/api/tips", "/api/tips/"):
         if method == "GET":
             user = auth.current_user(environ) if configured() else None
@@ -477,8 +488,10 @@ def application(environ, start_response):
                 allowed = "GET, POST"
             elif path in ("/api/tips", "/api/tips/"):
                 allowed = "GET, POST"
+            elif path in ("/api/features", "/api/auth/me", "/api/admin/metrics", "/api/admin/metrics/"):
+                allowed = "GET"
             else:
-                allowed = "GET" if path in ("/api/features", "/api/auth/me") else "POST"
+                allowed = "POST"
             headers = [("Allow", allowed)]
         else:
             headers = []

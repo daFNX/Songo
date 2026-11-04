@@ -44,6 +44,7 @@ const featureItems = ref(FEATURES)
 const featureConfigMessage = ref('')
 const authConfigured = ref(false)
 const isLightMode = ref(document.documentElement.dataset.theme === 'light')
+const isThemeAnimating = ref(false)
 const isOnline = ref(navigator.onLine)
 const isAuthOpen = ref(false)
 const isAuthSubmitting = ref(false)
@@ -64,6 +65,7 @@ const expandedHistoryId = ref('')
 const displayedBpm = ref(0)
 let undoDeleteTimer
 let historyActionTimer
+let themeAnimationTimer
 let bpmCounterFrame
 const bpmEnabled = computed(() => featureItems.value.some((feature) => feature.id === 'bpm' && feature.enabled && feature.available))
 const recordingEnabled = computed(() => featureItems.value.some((feature) => feature.id === 'recording' && feature.enabled && feature.available))
@@ -109,6 +111,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('songo:app-error', handleAppError)
   clearTimeout(undoDeleteTimer)
   clearTimeout(historyActionTimer)
+  clearTimeout(themeAnimationTimer)
   cancelAnimationFrame(bpmCounterFrame)
 })
 
@@ -132,6 +135,17 @@ function formatChordTime(seconds) {
   const minutes = Math.floor(seconds / 60)
   const remainder = Math.floor(seconds % 60)
   return `${minutes}:${String(remainder).padStart(2, '0')}`
+}
+
+function toggleTheme() {
+  isThemeAnimating.value = true
+  document.documentElement.classList.add('theme-transitioning')
+  isLightMode.value = !isLightMode.value
+  clearTimeout(themeAnimationTimer)
+  themeAnimationTimer = setTimeout(() => {
+    isThemeAnimating.value = false
+    document.documentElement.classList.remove('theme-transitioning')
+  }, 520)
 }
 
 watch(isLightMode, (enabled) => {
@@ -359,10 +373,6 @@ loadFeatureConfig()
           <a v-if="session" class="topbar-link" href="#/historial" :aria-current="currentPage === 'historial' ? 'page' : undefined">Historial</a>
           <a v-if="session?.role === 'admin'" class="topbar-link admin-nav-link" href="#/admin" :aria-current="currentPage === 'admin' ? 'page' : undefined">Admin</a>
         </div>
-        <button class="utility-button theme-toggle" type="button" :aria-pressed="isLightMode" @click="isLightMode = !isLightMode">
-          <span aria-hidden="true">{{ isLightMode ? '☾' : '☼' }}</span>
-          <span>{{ isLightMode ? 'Modo oscuro' : 'Modo claro' }}</span>
-        </button>
         <span v-if="session" class="session-name">{{ session.email }}</span>
         <button v-if="session" class="utility-button account-button" type="button" :disabled="!isOnline" @click="handleSignOut">Salir</button>
         <button v-else class="utility-button account-button" type="button" :disabled="isSessionLoading" @click="openSignIn">
@@ -897,5 +907,21 @@ loadFeatureConfig()
       </form>
       <p class="dialog-disclaimer">En producción, la contraseña se envía por HTTPS y se almacena con Argon2id. La sesión usa una cookie HttpOnly.</p>
     </dialog>
+
+    <aside class="theme-toast" :class="{ 'is-changing': isThemeAnimating }" aria-label="Preferencia de apariencia">
+      <span class="theme-toast-caption">Apariencia</span>
+      <button
+        class="theme-toast-toggle"
+        type="button"
+        role="switch"
+        :aria-checked="isLightMode"
+        :aria-label="`Cambiar a modo ${isLightMode ? 'oscuro' : 'claro'}`"
+        @click="toggleTheme"
+      >
+        <span class="theme-toast-icon" aria-hidden="true">{{ isLightMode ? '☼' : '☾' }}</span>
+        <span class="theme-toast-value">{{ isLightMode ? 'Claro' : 'Oscuro' }}</span>
+        <span class="theme-toast-track" aria-hidden="true"><span></span></span>
+      </button>
+    </aside>
   </div>
 </template>

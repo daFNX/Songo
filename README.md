@@ -116,6 +116,7 @@ No guardes `.env`, URLs de base con credenciales ni secretos en Git, capturas, l
 | `GET /api/auth/me` | Público | Consulta la sesión actual. |
 | `POST /api/auth/logout` | Sesión opcional | Revoca la sesión y expira la cookie. |
 | `GET /api/history` | Sesión requerida | Historial privado del usuario autenticado. |
+| `GET /api/admin/metrics` | Rol `admin` | Conteos agregados de usuarios, sesiones activas, análisis guardados y disponibilidad configurada del motor BPM. |
 | `GET /api/tips` | Público | Consejos publicados; ofrece ejemplos de referencia si la base no está configurada. |
 | `POST /api/tips` | Rol `admin` | Guarda/edita o elimina consejos de la biblioteca musical. |
 | `POST /api/catalog` | Rol `admin` | Incorpora una referencia solo con datos de autorización y licencia. |
@@ -147,7 +148,7 @@ El registro público siempre crea usuarios con rol `user`; no existe contraseña
 
 El script no se despliega como endpoint y no crea cuentas ni contraseñas. Una vez que el primer administrador exista, no puede volver a usarse para promover otra cuenta. Guarda el acceso a la base como secreto; nunca incluyas su URI en argumentos, logs o commits.
 
-Con el rol aplicado, cierra sesión y vuelve a entrar. Abre `/#/admin` o usa el enlace **Admin** de la navegación para crear, editar, publicar, ocultar y eliminar consejos musicales. La administración requiere PostgreSQL y el esquema actualizado.
+Con el rol aplicado, cierra sesión y vuelve a entrar. Abre `/#/admin` o usa el enlace **Admin** de la navegación para consultar métricas agregadas y crear, editar, publicar, ocultar y eliminar consejos musicales. La conexión mostrada en métricas verifica la respuesta del endpoint administrativo y el estado de configuración de BPM; no mide una ejecución real de audio. Los análisis sin sesión no se guardan ni aparecen en los conteos.
 
 ## Calidad y contribuciones
 

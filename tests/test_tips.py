@@ -158,5 +158,44 @@ class TipsApiTests(unittest.TestCase):
             })
 
 
+class AdminMetricsApiTests(unittest.TestCase):
+    def test_metrics_require_admin_role(self):
+        with patch(
+            "backend.gateway.auth.require_user",
+            side_effect=ApiError(403, "Esta operación requiere permisos de administración."),
+        ):
+            status, _, payload = request_api("GET", "/api/admin/metrics")
+
+        self.assertEqual(status, 403)
+        self.assertIn("administración", payload["error"])
+
+    def test_admin_metrics_return_counts_and_analyzer_status(self):
+        metrics = {
+            "users_total": 12,
+            "admins_total": 1,
+            "active_sessions": 4,
+            "saved_analyses_total": 35,
+            "saved_analyses_last_24h": 3,
+            "analyzer": {"enabled": True, "available": True, "status": "operational"},
+            "generated_at": "2026-11-04T12:00:00+00:00",
+        }
+        with patch("backend.gateway.auth.require_user", return_value={"id": "admin-id", "role": "admin"}):
+            with patch("backend.gateway._configured_features", return_value={
+                "features": [{"id": "bpm", "enabled": True, "available": True}]
+            }):
+                with patch("backend.gateway.admin_metrics.get_admin_metrics", return_value=metrics) as get_metrics:
+                    status, _, payload = request_api("GET", "/api/admin/metrics")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, metrics)
+        get_metrics.assert_called_once_with(analyzer_enabled=True, analyzer_available=True)
+
+    def test_metrics_endpoint_only_accepts_get(self):
+        status, headers, _ = request_api("POST", "/api/admin/metrics")
+
+        self.assertEqual(status, 405)
+        self.assertEqual(headers["Allow"], "GET")
+
+
 if __name__ == "__main__":
     unittest.main()

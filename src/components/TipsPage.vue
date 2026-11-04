@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { apiFetch } from '../services/api'
+import AdminMetrics from './AdminMetrics.vue'
 
 const props = defineProps({
   user: { type: Object, default: null },
@@ -186,10 +187,12 @@ onMounted(loadTips)
       <div class="tips-hero-mark" aria-hidden="true"><span>♬</span><i></i><i></i><i></i><i></i><i></i></div>
     </section>
 
+    <AdminMetrics v-if="adminView && isAdmin" :is-online="isOnline" />
+
     <section class="tips-content" aria-labelledby="tips-list-title">
       <div class="tips-toolbar">
         <div>
-          <p class="section-index">01 <span>/</span> LA GUÍA</p>
+          <p class="section-index">{{ adminView ? '02' : '01' }} <span>/</span> {{ adminView ? 'GESTIÓN DE CONSEJOS' : 'LA GUÍA' }}</p>
           <h2 id="tips-list-title">{{ visibleTips.length }} ideas para tu próxima sesión</h2>
         </div>
         <button v-if="isAdmin" class="analyze-button tips-create" type="button" :disabled="!isOnline" @click="beginNewTip">
@@ -247,7 +250,7 @@ onMounted(loadTips)
     <section v-if="editorOpen && isAdmin" class="tip-editor glass-card" aria-labelledby="tip-editor-title">
       <div class="tips-toolbar">
         <div>
-          <p class="section-index">02 <span>/</span> ADMINISTRACIÓN</p>
+          <p class="section-index">03 <span>/</span> ADMINISTRACIÓN</p>
           <h2 id="tip-editor-title">{{ editingId ? 'Editar consejo' : 'Nuevo consejo' }}</h2>
         </div>
         <button class="secondary-cta" type="button" @click="editorOpen = false">Cerrar</button>
