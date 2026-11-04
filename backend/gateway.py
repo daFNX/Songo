@@ -91,6 +91,14 @@ def _configured_features():
     }
 
 
+def _enabled_feature_ids():
+    return {
+        feature["id"]
+        for feature in _configured_features()["features"]
+        if feature["enabled"]
+    }
+
+
 def _check_origin(environ):
     origin = environ.get("HTTP_ORIGIN")
     if not origin:
@@ -279,6 +287,8 @@ def _route(path, method, environ, start_response):
         if method != "GET":
             raise ApiError(405, "Método no permitido.")
         user = auth.require_user(environ)
+        if "library" not in _enabled_feature_ids():
+            raise ApiError(503, "La biblioteca está desactivada en este servidor.")
         return 200, {"items": _history(environ, user)}, []
 
     if path in ("/api/catalog", "/api/catalog/"):
@@ -286,6 +296,8 @@ def _route(path, method, environ, start_response):
             raise ApiError(405, "Método no permitido.")
         _check_origin(environ)
         user = auth.require_user(environ, admin=True)
+        if "similarity" not in _enabled_feature_ids():
+            raise ApiError(503, "La comparación del catálogo está desactivada en este servidor.")
         payload = _json_body(environ)
         if not isinstance(payload, dict):
             raise ApiError(400, "El cuerpo debe ser un objeto JSON.")
