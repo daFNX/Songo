@@ -906,9 +906,24 @@ loadFeatureConfig()
         </button>
       </form>
       <p class="dialog-disclaimer">En producción, la contraseña se envía por HTTPS y se almacena con Argon2id. La sesión usa una cookie HttpOnly.</p>
+      <aside class="theme-toast" :class="{ 'is-changing': isThemeAnimating }" aria-label="Preferencia de apariencia">
+        <span class="theme-toast-caption">Apariencia</span>
+        <button
+          class="theme-toast-toggle"
+          type="button"
+          role="switch"
+          :aria-checked="isLightMode"
+          :aria-label="`Cambiar a modo ${isLightMode ? 'oscuro' : 'claro'}`"
+          @click="toggleTheme"
+        >
+          <span class="theme-toast-icon" aria-hidden="true">{{ isLightMode ? '☼' : '☾' }}</span>
+          <span class="theme-toast-value">{{ isLightMode ? 'Claro' : 'Oscuro' }}</span>
+          <span class="theme-toast-track" aria-hidden="true"><span></span></span>
+        </button>
+      </aside>
     </dialog>
 
-    <aside class="theme-toast" :class="{ 'is-changing': isThemeAnimating }" aria-label="Preferencia de apariencia">
+    <aside v-else class="theme-toast" :class="{ 'is-changing': isThemeAnimating }" aria-label="Preferencia de apariencia">
       <span class="theme-toast-caption">Apariencia</span>
       <button
         class="theme-toast-toggle"
