@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useAudioAnalyzer } from './composables/useAudioAnalyzer'
 import { useAuthSession } from './composables/useAuthSession'
 import { FEATURES, mergeFeatureConfig } from './features'
@@ -26,6 +26,12 @@ const {
   stopRecording,
 } = useAudioAnalyzer()
 const { session, sessionError, isSessionLoading, signIn, signOut } = useAuthSession()
+const routeNames = new Set(['inicio', 'analizador', 'historial'])
+function readPage() {
+  const page = window.location.hash.replace(/^#\/?/, '').split('/')[0] || 'inicio'
+  return routeNames.has(page) ? page : 'inicio'
+}
+const currentPage = ref(readPage())
 const featureItems = ref(FEATURES)
 const featureConfigMessage = ref('')
 const authConfigured = ref(false)
@@ -37,7 +43,7 @@ const authMode = ref('login')
 const authDialog = ref(null)
 const historyItems = ref([])
 const historyError = ref('')
-const isHistoryOpen = ref(false)
+const historyLoading = ref(false)
 const bpmEnabled = computed(() => featureItems.value.some((feature) => feature.id === 'bpm' && feature.enabled && feature.available))
 const recordingEnabled = computed(() => featureItems.value.some((feature) => feature.id === 'recording' && feature.enabled && feature.available))
 const futureFeatures = computed(() => featureItems.value.filter((feature) => !['bpm', 'recording'].includes(feature.id)))
@@ -46,6 +52,23 @@ const recordingTime = computed(() => {
   const seconds = String(recordingSeconds.value % 60).padStart(2, '0')
   return `${minutes}:${seconds}`
 })
+
+function updatePage() {
+  currentPage.value = readPage()
+}
+
+function navigateTo(page) {
+  if (!routeNames.has(page)) return
+  const hash = `#/${page}`
+  if (window.location.hash === hash) {
+    currentPage.value = page
+    return
+  }
+  window.location.hash = hash
+}
+
+window.addEventListener('hashchange', updatePage)
+onBeforeUnmount(() => window.removeEventListener('hashchange', updatePage))
 
 function formatChordTime(seconds) {
   const minutes = Math.floor(seconds / 60)
@@ -62,6 +85,15 @@ watch(isAuthOpen, async (open) => {
   await nextTick()
   if (open) authDialog.value?.showModal()
 })
+
+watch([currentPage, session, isSessionLoading], ([page, user, loading]) => {
+  if (page !== 'historial' || loading) return
+  if (user) {
+    loadHistory()
+  } else if (!isAuthOpen.value) {
+    openSignIn()
+  }
+}, { immediate: true })
 
 async function loadFeatureConfig() {
   try {
@@ -96,15 +128,31 @@ function handleFeatureAction(feature) {
 }
 
 async function loadHistory() {
+  if (historyLoading.value) return
+  if (!session.value) {
+    navigateTo('historial')
+    openSignIn()
+    return
+  }
+  historyLoading.value = true
   historyError.value = ''
   try {
     const response = await fetch('/api/history?limit=20', { credentials: 'same-origin' })
     const payload = await response.json()
     if (!response.ok) throw new Error(payload.error || 'No pudimos consultar tu historial.')
     historyItems.value = payload.items
-    isHistoryOpen.value = true
+    navigateTo('historial')
   } catch (error) {
     historyError.value = error.message || 'No pudimos consultar tu historial.'
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function handleSignOut() {
+  if (await signOut()) {
+    historyItems.value = []
+    if (currentPage.value === 'historial') navigateTo('inicio')
   }
 }
 
@@ -114,7 +162,7 @@ loadFeatureConfig()
 <template>
   <div class="page-shell">
     <header class="topbar">
-      <a class="wordmark" href="/" aria-label="Songo, inicio">
+      <a class="wordmark" href="#/inicio" aria-label="Songo, inicio">
         <span class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 32 32" fill="none">
             <path d="M5 17h4l3-8 5 15 4-11 2 4h4" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" />
@@ -123,21 +171,67 @@ loadFeatureConfig()
         <span>songo<span class="wordmark-period">.</span></span>
       </a>
       <div class="topbar-note"><span class="status-dot"></span> Estudio de audio · beta</div>
-      <nav class="topbar-actions" aria-label="Acciones de cuenta y apariencia">
-        <a class="topbar-link" href="#como-funciona">Cómo funciona <span aria-hidden="true">↗</span></a>
+      <nav class="topbar-actions" aria-label="Navegación y cuenta">
+        <div class="app-nav">
+          <a class="topbar-link" href="#/inicio" :aria-current="currentPage === 'inicio' ? 'page' : undefined">Inicio</a>
+          <a class="topbar-link" href="#/analizador" :aria-current="currentPage === 'analizador' ? 'page' : undefined">Analizador</a>
+          <a v-if="session" class="topbar-link" href="#/historial" :aria-current="currentPage === 'historial' ? 'page' : undefined">Historial</a>
+        </div>
         <button class="utility-button theme-toggle" type="button" :aria-pressed="isLightMode" @click="isLightMode = !isLightMode">
           <span aria-hidden="true">{{ isLightMode ? '☾' : '☼' }}</span>
           <span>{{ isLightMode ? 'Modo oscuro' : 'Modo claro' }}</span>
         </button>
         <span v-if="session" class="session-name">{{ session.email }}</span>
-        <button v-if="session" class="utility-button account-button" type="button" @click="signOut">Salir</button>
+        <button v-if="session" class="utility-button account-button" type="button" @click="handleSignOut">Salir</button>
         <button v-else class="utility-button account-button" type="button" :disabled="isSessionLoading" @click="openSignIn">
           {{ isSessionLoading ? 'Verificando…' : 'Entrar' }}
         </button>
       </nav>
     </header>
 
-    <main>
+    <main v-if="currentPage === 'inicio'" class="home-page">
+      <section class="home-hero" aria-labelledby="home-title">
+        <div class="eyebrow"><span class="eyebrow-line"></span> UN ESPACIO DE ESCUCHA PARA MÚSICOS</div>
+        <h1 id="home-title">Entiende lo que <span>suena</span> en tu música.</h1>
+        <p class="intro-copy">Songo transforma tus ideas en información musical clara: empieza por el pulso, explora la armonía y vuelve a crear con intención.</p>
+        <div class="home-actions">
+          <a class="analyze-button home-cta" href="#/analizador">Abrir el analizador <span class="button-arrow" aria-hidden="true">↗</span></a>
+          <a class="secondary-cta" href="#como-funciona">Conoce el proceso ↓</a>
+        </div>
+        <div class="home-signature"><span class="status-dot"></span> Tu música, sin dudas.</div>
+      </section>
+
+      <section id="como-funciona" class="how-it-works home-tutorial" aria-labelledby="home-how-title">
+        <div class="how-heading">
+          <p class="section-index">01 <span>/</span> CÓMO FUNCIONA</p>
+          <h2 id="home-how-title">De la grabación a una idea más clara.</h2>
+        </div>
+        <div class="steps">
+          <article class="step"><span class="step-number">01</span><h3>Comparte tu audio</h3><p>Elige una grabación de hasta 50 MB o toma una idea con el micrófono.</p></article>
+          <article class="step"><span class="step-number">02</span><h3>Preparamos la escucha</h3><p>El navegador crea una copia ligera; el servidor Python estima sus patrones.</p></article>
+          <article class="step"><span class="step-number">03</span><h3>Explora tus resultados</h3><p>Consulta tempo y, al iniciar sesión y habilitarlo, armonía e historial privado.</p></article>
+        </div>
+      </section>
+
+      <section class="brand-section" aria-labelledby="brand-title">
+        <div>
+          <p class="section-index">02 <span>/</span> LA MARCA</p>
+          <h2 id="brand-title">Tu proceso creativo merece herramientas honestas.</h2>
+        </div>
+        <p>Songo nace para acompañar a quienes componen, producen y ensayan. No pretende decidir qué es buena música: ofrece referencias para que cada músico tome sus propias decisiones. El audio se procesa para el análisis y no se conserva como una grabación en la biblioteca.</p>
+      </section>
+
+      <section class="home-tools" aria-labelledby="home-tools-title">
+        <div>
+          <p class="section-index">03 <span>/</span> HERRAMIENTAS</p>
+          <h2 id="home-tools-title">Empieza por lo esencial.</h2>
+          <p>El análisis de BPM y la grabación están disponibles. Acordes, tonalidad, historial y catálogo requieren una cuenta y configuración segura.</p>
+        </div>
+        <a class="analyze-button home-cta" href="#/analizador">Probar Songo <span class="button-arrow" aria-hidden="true">↗</span></a>
+      </section>
+    </main>
+
+    <main v-else-if="currentPage === 'analizador'">
       <section class="intro" aria-labelledby="page-title">
         <div class="eyebrow"><span class="eyebrow-line"></span> PARA QUIENES HACEN MÚSICA</div>
         <h1 id="page-title">Encuentra el <span>pulso</span><br />de lo que creas.</h1>
@@ -359,26 +453,14 @@ loadFeatureConfig()
               {{ feature.enabled ? 'Disponible con cuenta' : feature.available ? 'Requiere configuración y cuenta' : 'Requiere base de datos y cuenta' }}
             </span>
             <span v-else class="feature-locked">Próximamente</span>
-            <button
+            <a
               v-if="feature.id === 'library' && session && feature.enabled"
               class="feature-action"
-              type="button"
-              @click="loadHistory"
+              href="#/historial"
+              @click.prevent="loadHistory"
             >
               Ver mi historial <span aria-hidden="true">↗</span>
-            </button>
-          </article>
-        </div>
-        <p v-if="historyError" class="auth-error" role="alert">{{ historyError }}</p>
-        <div v-if="isHistoryOpen" class="history-list" aria-live="polite">
-          <div class="history-heading">
-            <h3>Mis análisis recientes</h3>
-            <button class="browse-button" type="button" @click="isHistoryOpen = false">Cerrar</button>
-          </div>
-          <p v-if="!historyItems.length" class="history-empty">Todavía no hay análisis guardados.</p>
-          <article v-for="item in historyItems" :key="item.id" class="history-item">
-            <strong>{{ item.bpm }} BPM<span v-if="item.key"> · {{ item.key }}</span></strong>
-            <span>{{ new Date(item.created_at).toLocaleString() }}</span>
+            </a>
           </article>
         </div>
         <p class="session-disclaimer">
@@ -388,8 +470,46 @@ loadFeatureConfig()
       </section>
     </main>
 
+    <main v-else-if="currentPage === 'historial'" class="history-page">
+      <section class="intro" aria-labelledby="history-title">
+        <div class="eyebrow"><span class="eyebrow-line"></span> TU ESPACIO PRIVADO</div>
+        <h1 id="history-title">Tu música, <span>en perspectiva.</span></h1>
+        <p class="intro-copy">Los análisis guardados en tu cuenta, listos para volver a escuchar.</p>
+      </section>
+      <section class="history-list history-page-list" aria-live="polite" aria-labelledby="history-list-title">
+        <div class="history-heading">
+          <div>
+            <p class="section-index">01 <span>/</span> HISTORIAL</p>
+            <h2 id="history-list-title">Análisis recientes</h2>
+          </div>
+          <a class="secondary-cta" href="#/analizador">Nuevo análisis ↗</a>
+        </div>
+        <p v-if="!session" class="history-empty">Inicia sesión para consultar tu biblioteca privada.</p>
+        <p v-else-if="historyLoading" class="history-empty" role="status">Cargando tus análisis…</p>
+        <p v-else-if="historyError" class="auth-error" role="alert">{{ historyError }}</p>
+        <p v-else-if="!historyItems.length" class="history-empty">Todavía no hay análisis guardados. Analiza una grabación para empezar tu biblioteca.</p>
+        <article v-for="item in historyItems" :key="item.id" class="history-item">
+          <div class="history-result-main">
+            <strong>{{ item.bpm }} BPM<span v-if="item.key"> · {{ item.key }}</span></strong>
+            <span>{{ new Date(item.created_at).toLocaleString() }}</span>
+          </div>
+          <div v-if="item.chords?.length" class="history-chords" aria-label="Acordes detectados">
+            <span v-for="(chord, index) in item.chords" :key="`${chord.start_seconds}-${index}`">
+              {{ chord.chord }} <small>{{ formatChordTime(chord.start_seconds) }}</small>
+            </span>
+          </div>
+          <div v-if="item.similarity_matches?.length" class="history-matches">
+            <span v-for="match in item.similarity_matches" :key="match.id">
+              {{ match.artist }} — {{ match.title }} · {{ match.similarity_percent }}%
+            </span>
+          </div>
+        </article>
+        <p class="session-disclaimer">Las coincidencias comparan rasgos con el catálogo autorizado; no son una evaluación legal de plagio.</p>
+      </section>
+    </main>
+
     <footer class="footer">
-      <a class="footer-wordmark" href="/">songo<span>.</span></a>
+      <a class="footer-wordmark" href="#/inicio">songo<span>.</span></a>
       <span>Tu música, sin dudas.</span>
       <span class="footer-meta">Hecho para quienes hacen música <span aria-hidden="true">♡</span></span>
     </footer>
@@ -405,9 +525,6 @@ loadFeatureConfig()
       <p class="section-index">CUENTA SEGURA</p>
       <h2 id="auth-title">{{ authMode === 'register' ? 'Crea tu cuenta.' : 'Bienvenido de vuelta.' }}</h2>
       <p class="dialog-copy">Tu cuenta protege el historial y habilita las herramientas de análisis musical.</p>
-      <p v-if="!authConfigured" class="auth-error" role="status">
-        Las cuentas todavía no están configuradas en este servidor. El análisis básico sigue disponible.
-      </p>
       <p v-if="!authConfigured" class="auth-error" role="status">
         El servidor no tiene autenticación activa. Configura PostgreSQL y JWT_SECRET para habilitar cuentas.
       </p>

@@ -2,7 +2,7 @@
 
 **Songo: Tu música, sin dudas.** Es una herramienta para músicos que estima el tempo de una grabación y explora patrones armónicos. El proyecto combina una interfaz Vue 3, preprocesamiento de audio en el navegador y una API Python.
 
-La aplicación es un prototipo funcional. BPM está abierto; acordes, tonalidad, sesiones e historial están implementados en una etapa inicial y requieren una base PostgreSQL y un secreto de sesión. La detección armónica y la comparación son aproximaciones experimentales: no identifican canciones con fiabilidad ni determinan legalmente si existe plagio. El catálogo solo debe contener material con autorización documentada.
+La aplicación es un prototipo funcional. BPM y grabación están disponibles; acordes, tonalidad, sesiones, similitud e historial están habilitados en producción tras configurar PostgreSQL y el secreto de sesión. La detección armónica y la comparación son aproximaciones experimentales: no identifican canciones con fiabilidad ni determinan legalmente si existe plagio. El catálogo solo debe contener material con autorización documentada.
 
 ## Arquitectura
 
@@ -12,6 +12,14 @@ La aplicación es un prototipo funcional. BPM está abierto; acordes, tonalidad,
 - `db/schema.sql`: DDL de PostgreSQL.
 - `tests/`: pruebas Python sin necesidad de credenciales de base de datos.
 - `vercel.json`: cabeceras de seguridad y límites de las funciones.
+
+## Secciones de la aplicación
+
+- `/#/inicio`: presentación de Songo, su propósito y un tutorial breve.
+- `/#/analizador`: carga/grabación de audio, tempo, tonalidad y secuencia aproximada de acordes.
+- `/#/historial`: resultados guardados, protegidos por sesión y separados por usuario.
+
+La comparación consulta únicamente entradas autorizadas cargadas por un usuario administrador. El catálogo de producción está inicialmente vacío; no se incorporan grabaciones de terceros automáticamente.
 
 En el flujo de audio, el navegador decodifica el archivo original y lo convierte a WAV PCM mono de 11.025 Hz. El archivo convertido, de hasta 4 MB, se envía al endpoint de análisis; el servidor valida tipo, duración, canales y frecuencia, procesa las muestras en memoria y limpia los buffers mutables al terminar. No se guarda el archivo de audio.
 
@@ -75,7 +83,7 @@ Las cuentas usan contraseñas Argon2id y JWT firmados en cookies `HttpOnly`, con
 | Variable | Propósito |
 | --- | --- |
 | `DATABASE_URL` | URI privado de PostgreSQL; tiene prioridad sobre `POSTGRES_URL`. |
-| `POSTGRES_URL` | Alias compatible con variables automáticas de Vercel Postgres. |
+| `POSTGRES_URL` | Alias de Vercel/PostgreSQL. Si el URI no puede interpretarse por caracteres reservados, la conexión decodifica sus componentes o usa `POSTGRES_HOST`, `POSTGRES_DATABASE`, `POSTGRES_USER` y `POSTGRES_PASSWORD`. |
 | `DATABASE_CONNECT_TIMEOUT` | Tiempo máximo de conexión a la DB. |
 | `JWT_SECRET` | Secreto aleatorio de firma, de al menos 32 bytes. |
 | `JWT_ISSUER` | Emisor validado en los tokens. |
